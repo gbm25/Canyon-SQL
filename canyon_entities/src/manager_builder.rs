@@ -60,7 +60,7 @@ pub fn generate_enum_with_fields(canyon_entity: &CanyonEntity) -> TokenStream {
         /// through the [`QueryBuilder`], when one of the methods requires to get
         /// a column name (which is the name of some field of the type) as a parameter
         ///
-        /// ```
+        /// 
         /// pub struct League {
         ///     id: i32,
         ///     name: String
@@ -72,7 +72,7 @@ pub fn generate_enum_with_fields(canyon_entity: &CanyonEntity) -> TokenStream {
         ///     id(i32),
         ///     name(String)
         /// }
-        /// ```
+        ///
         #visibility enum #enum_name #generics {
             #(#fields_names),*
         }
@@ -110,7 +110,7 @@ pub fn generate_enum_with_fields_values(canyon_entity: &CanyonEntity) -> TokenSt
         /// Auto-generated enumeration to represent each field of the related
         /// type as a variant, which can support and contain a value of the field data type.
         ///
-        /// ```
+        /// 
         /// pub struct League {
         ///     id: i32,
         ///     name: String,
@@ -124,7 +124,7 @@ pub fn generate_enum_with_fields_values(canyon_entity: &CanyonEntity) -> TokenSt
         ///     name(String)
         ///     opt(Option<String>)
         /// }
-        /// ```
+        /// 
         #visibility enum #enum_name<'a> {
             #(#fields_names),*
         }
