@@ -148,7 +148,7 @@ pub fn generate_insert_tokens(macro_data: &MacroTokens, table_schema_data: &Stri
         /// This operation returns a result type, indicating a possible failure querying the database.
         ///
         /// ## *Examples*
-        ///```
+        ///
         /// let mut lec: League = League {
         ///     id: Default::default(),
         ///     ext_id: 1,
@@ -169,7 +169,7 @@ pub fn generate_insert_tokens(macro_data: &MacroTokens, table_schema_data: &Stri
         /// } else {
         ///     eprintln!("{:?}", ins_result.err())
         /// }
-        /// ```
+        ///
         ///
         async fn insert<'a>(&mut self)
             -> Result<(), Box<dyn std::error::Error + Sync + std::marker::Send>>
@@ -194,7 +194,7 @@ pub fn generate_insert_tokens(macro_data: &MacroTokens, table_schema_data: &Stri
         /// This operation returns a result type, indicating a possible failure querying the database.
         ///
         /// ## *Examples*
-        ///```
+        ///
         /// let mut lec: League = League {
         ///     id: Default::default(),
         ///     ext_id: 1,
@@ -215,7 +215,7 @@ pub fn generate_insert_tokens(macro_data: &MacroTokens, table_schema_data: &Stri
         /// } else {
         ///     eprintln!("{:?}", ins_result.err())
         /// }
-        /// ```
+        ///
         ///
         async fn insert_datasource<'a>(&mut self, datasource_name: &'a str)
             -> Result<(), Box<dyn std::error::Error + Sync + std::marker::Send>>
@@ -464,7 +464,7 @@ pub fn generate_multiple_insert_tokens(
     quote! {
         /// Inserts multiple instances of some type `T` into its related table.
         ///
-        /// ```
+        /// 
         /// let mut new_league = League {
         ///     id: Default::default(),
         ///    ext_id: 392489032,
@@ -494,7 +494,7 @@ pub fn generate_multiple_insert_tokens(
         ///     &mut [&mut new_league, &mut new_league2, &mut new_league3]
         /// ).await
         /// .ok();
-        /// ```
+        /// 
         async fn multi_insert<'a>(instances: &'a mut [&'a mut #ty]) -> (
             Result<(), Box<dyn std::error::Error + Sync + std::marker::Send>>
         ) {
@@ -521,7 +521,7 @@ pub fn generate_multiple_insert_tokens(
         /// Inserts multiple instances of some type `T` into its related table with the specified
         /// datasource by it's `datasouce name`, defined in the configuration file.
         ///
-        /// ```
+        /// 
         /// let mut new_league = League {
         ///     id: Default::default(),
         ///    ext_id: 392489032,
@@ -551,7 +551,7 @@ pub fn generate_multiple_insert_tokens(
         ///     &mut [&mut new_league, &mut new_league2, &mut new_league3]
         /// ).await
         /// .ok();
-        /// ```
+        ///
         async fn multi_insert_datasource<'a>(instances: &'a mut [&'a mut #ty], datasource_name: &'a str) -> (
             Result<(), Box<dyn std::error::Error + Sync + std::marker::Send>>
         ) {
