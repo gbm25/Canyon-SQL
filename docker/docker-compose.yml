@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:14
+    image: postgres:15.2-alpine3.17
     restart: always
     hostname: postgres
     environment:
