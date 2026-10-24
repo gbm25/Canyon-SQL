@@ -16,6 +16,10 @@ canyon_migrations = { workspace = true, optional = true }
 name = "canyon_integration_tests"
 path = "canyon_integration_tests.rs"
 
+[[test]]
+name = "compile_tests"
+path = "compile_tests.rs"
+
 [features]
 postgres = ["canyon_sql/postgres"]
 mssql = ["canyon_sql/mssql"]
