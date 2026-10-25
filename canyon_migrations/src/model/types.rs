@@ -75,6 +75,30 @@ pub enum Logical {
     Other(NativeType),
 }
 
+/// A type as a message writes it.
+pub fn type_words(ty: &Logical) -> String {
+    match ty {
+        Logical::Known(t) => sql_type_words(*t),
+        Logical::Other(native) => native.raw.as_str().to_owned(),
+    }
+}
+
+pub fn sql_type_words(ty: SqlType) -> String {
+    match ty {
+        SqlType::Bool => "boolean".into(),
+        SqlType::SmallInt => "smallint".into(),
+        SqlType::Int => "integer".into(),
+        SqlType::BigInt => "bigint".into(),
+        SqlType::Text { max_len: None } => "text".into(),
+        SqlType::Text { max_len: Some(n) } => format!("text({n})"),
+        SqlType::Date => "date".into(),
+        SqlType::Time { precision } => format!("time({precision})"),
+        SqlType::Timestamp { precision } => format!("timestamp({precision})"),
+        // `SqlType` is `#[non_exhaustive]`: a new variant needs its words here.
+        _ => "an unsupported type".into(),
+    }
+}
+
 /// How an existing column relates to what a field needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compat {

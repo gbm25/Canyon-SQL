@@ -6,10 +6,11 @@ use canyon_migrations::dialect::{DdlDialect, LowerError};
 use canyon_migrations::introspect::{Catalog, introspect};
 use canyon_migrations::model::{ColumnDef, ColumnDefault, Generated, Ident, Logical};
 use canyon_migrations::model::{QualifiedName, SchemaModel, TableDef};
-use canyon_migrations::op::{Ctx, Op, Statement};
+use canyon_migrations::op::{Ctx, Op, Param, Statement};
 use canyon_sql::CanyonResult;
 use canyon_sql::connection::{DatabaseType, DbConnection};
 use canyon_sql::core::SqlType;
+use canyon_sql::date_time::{NaiveDate, NaiveTime};
 use canyon_sql::query::QueryParameter;
 
 pub(crate) async fn read(db: &TestDb, schemas: &[Ident]) -> Catalog {
@@ -225,6 +226,75 @@ async fn canonical_types_read_back(datasource: &str) -> CanyonResult<()> {
 per_backend!(
     introspection_canonical_types_read_back,
     super::canonical_types_read_back
+);
+
+/// `FillColumn` binds every `Param` to a column of its type: the `SetNotNull` after it
+/// only works if the row got its value.
+async fn fill_column_binds_every_param(datasource: &str) -> CanyonResult<()> {
+    let day = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+    let at = NaiveTime::from_hms_opt(1, 2, 3).unwrap();
+    let cases = [
+        ("b", SqlType::Bool, Param::Bool(true)),
+        ("s", SqlType::SmallInt, Param::SmallInt(7)),
+        ("i", SqlType::Int, Param::Int(7)),
+        ("l", SqlType::BigInt, Param::BigInt(7)),
+        (
+            "t",
+            SqlType::Text { max_len: None },
+            Param::Text("x'y".into()),
+        ),
+        (
+            "v",
+            SqlType::Text { max_len: Some(20) },
+            Param::Text("x'y".into()),
+        ),
+        ("d", SqlType::Date, Param::Date(day)),
+        ("tm", SqlType::Time { precision: 0 }, Param::Time(at)),
+        (
+            "ts",
+            SqlType::Timestamp { precision: 0 },
+            Param::Timestamp(day.and_time(at)),
+        ),
+    ];
+    let mut b = TableDef::builder("Fill", "fill").column("id", SqlType::Int, false);
+    for (c, ty, _) in &cases {
+        b = b.column(c, *ty, true);
+    }
+    let create = Op::CreateTable(b.build().unwrap());
+    let model = TestDb::with(datasource, "fill_column", async |db| {
+        apply(db, &create).await?;
+        db.conn()
+            .execute("INSERT INTO fill (id) VALUES (1)", &[])
+            .await?;
+        let table = QualifiedName::parse("fill").unwrap();
+        for (c, _, value) in cases {
+            let column = ident(c);
+            let fill = Op::FillColumn {
+                table: table.clone(),
+                column: column.clone(),
+                value,
+            };
+            apply(db, &fill).await?;
+            let not_null = Op::SetNotNull {
+                table: table.clone(),
+                column,
+            };
+            apply(db, &not_null).await?;
+        }
+        Ok(read_model(db).await)
+    })
+    .await?;
+    let fill = table(&model, "fill");
+    assert!(
+        fill.columns.iter().all(|c| !c.nullable),
+        "{:?}",
+        fill.columns
+    );
+    Ok(())
+}
+per_backend!(
+    migrations_fill_column_binds_every_param,
+    super::fill_column_binds_every_param
 );
 
 /// Asked schemas are read too; tables in them keep their schema, references to the

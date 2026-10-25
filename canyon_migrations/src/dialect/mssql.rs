@@ -4,7 +4,7 @@
 //! Every statement goes out as its own `sp_executesql` call: a `SET` inside one is undone
 //! when it returns, so anything that needs a `SET` keeps it in the same statement.
 
-use super::{DdlDialect, DdlWriter, LowerError, TypeSql};
+use super::{DdlDialect, DdlWriter, LowerError, TypeSql, fill_column};
 use super::{actual_column, actual_type, add_foreign_key, add_primary_key, desired_type};
 use super::{drop_constraint, fk_name, known, one, pk_name, renamed_constraints};
 use super::{restated, rewritable};
@@ -17,7 +17,18 @@ use canyon_core::types::SqlType;
 type W = DdlWriter<MsSql>;
 
 impl DdlDialect for MsSql {
+    const NAME: &'static str = "SQL Server";
     const TRANSACTIONAL_DDL: bool = true;
+    const TEXT_KEY_NEEDS_LENGTH: bool = true;
+    const MAX_KEY_LENGTH: Option<u32> = Some(450);
+    const MAX_LENGTH: u32 = 4000;
+    const MAX_PRECISION: u8 = 7;
+    const KEY_COLUMNS_BLOCK_TYPE_CHANGE: bool = true;
+    const REWRITES_COLUMN: bool = true;
+    const GENERATED_BLOCKS_BASE_TYPE_CHANGE: bool = true;
+    // The value goes as nvarchar and the server converts it
+    const TEXT_PARAM_TYPES: &'static [&'static str] =
+        &["char", "varchar", "nchar", "text", "ntext"];
 
     fn type_sql(ty: SqlType) -> Result<TypeSql, LowerError> {
         Ok(TypeSql::new(match ty {
@@ -107,6 +118,11 @@ impl DdlDialect for MsSql {
                 to.as_str(),
                 Some("COLUMN"),
             )]),
+            Op::FillColumn {
+                table,
+                column,
+                value,
+            } => one(fill_column::<Self>(table, column, value)),
             Op::DropColumn { table, column } => {
                 let (_, actual) = actual_column(ctx, table, column)?;
                 let mut out = drop_default(table, actual);
@@ -193,7 +209,9 @@ impl DdlDialect for MsSql {
 }
 
 fn column_def(w: &mut W, column: &ColumnDef, identity: bool) -> Result<(), LowerError> {
-    let ty = desired_type::<MsSql>(column)?;
+    // A rebuild copies columns read from the database: an unmapped type goes back as the
+    // catalog wrote it. Desired columns are always `Known`
+    let ty = actual_type::<MsSql>(column)?;
     w.ident(&column.name).raw(" ").ty(&ty);
     // Only a column read from the database has one (a rebuild's copy)
     if let Some(collation) = &column.extra.collation {
@@ -432,6 +450,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn rebuild_keeps_a_type_canyon_does_not_map() {
+        let other = Logical::Other(NativeType::named("varchar", "varchar(50)"));
+        let mut from = player();
+        from.columns[1].ty = other.clone();
+        let Op::RebuildTable {
+            from,
+            mut to,
+            column_map,
+        } = rebuild_op_from(from)
+        else {
+            unreachable!()
+        };
+        to.columns[1].ty = other;
+        let op = Op::RebuildTable {
+            from,
+            to,
+            column_map,
+        };
+        let sql = render::<MsSql>(&op, &actual(None), "dbo");
+        assert!(sql.contains("[name] varchar(50) NOT NULL"), "{sql}");
     }
 
     #[test]

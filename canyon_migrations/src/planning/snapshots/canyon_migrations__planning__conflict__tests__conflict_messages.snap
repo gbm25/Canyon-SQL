@@ -1,0 +1,99 @@
+---
+source: canyon_migrations/src/planning/conflict.rs
+expression: "ConflictReport\n{ datasource: \"postgres_docker\", conflicts: &conflicts }.to_string()"
+---
+Migrations for datasource `postgres_docker` stopped: 33 conflicts, nothing was applied.
+
+  1. tables `Player` and `player` only differ in case.
+     SQL Server and MySQL on Windows/macOS treat them as one table. Rename one of them.
+
+  2. player: `league` references `league.id`, which is neither an entity nor a table in the database.
+     Check `foreign_key(references = ...)`.
+
+  3. player: `league` and the column it references, `league.id`, have different types.
+     Use the same type (and `length`) on both fields.
+
+  4. player: the foreign key (`league`, `season`) must reference the primary key of `league`.
+     Point it at the key column(s) of that table.
+
+  5. foreign keys on `a_b` and `a.b_c` both get the name `a_b_c_fkey`.
+     SQL Server and MySQL need it unique in the schema. Rename one of the tables or columns.
+
+  6. player.slug: a text key needs `length` on SQL Server.
+
+  7. player.slug: text keys are limited to 768 characters on MySQL.
+
+  8. player.bio: `length` is limited to 4000 on SQL Server; use `String` without `length`.
+
+  9. player.bio: `length` must be at least 1.
+
+  10. player.seen: `precision` is limited to 6 on PostgreSQL.
+
+  11. player: a row can take 80008 bytes, MySQL's limit is 65535.
+     Lower some `length` values, or use `String` without `length` for long text.
+
+  12. player: `id` is in the primary key, so it can't be nullable.
+     Use a type that isn't an `Option` for that field.
+
+  13. schema `DBO` only differs in case from the default schema `dbo`.
+     Write it as `dbo`, or leave `schema` out.
+
+  14. table `player` is gone and `gamer` or `athlete` could be its new name.
+     Run `migrate` to choose.
+
+  15. player: column `age` (integer) was removed and `birth_date` (date) was added.
+     Is it a rename? Run `migrate` to choose, or do it in two steps.
+
+  16. tables `gamer`, `player` swap names. Canyon can't do that in one run.
+     Rename one of them to a temporary name first.
+
+  17. tables `a`, `b`, `c` take each other's names. Canyon can't do that in one run.
+     Rename one of them to a temporary name first.
+
+  18. table `player` should be renamed to `gamer`, but `gamer` already exists in the database.
+     Drop or rename `gamer` by hand first, or run `migrate` to choose.
+
+  19. player: column `nick` should be renamed to `name`, but `name` already exists in the database.
+     Drop or rename `name` by hand first, or run `migrate` to choose.
+
+  20. Drop column player.nick would lose data.
+     Run `migrate` to confirm it, or set `allow_destructive = true` for this datasource.
+
+  21. league: new column `region` is NOT NULL and the table has rows.
+     Make the field an `Option`, or run `migrate` to give a value for the existing rows.
+
+  22. league: `region` can't become NOT NULL, some rows have no value.
+     Fill them first, or run `migrate` to give a value.
+
+  23. league: some values of `points` don't fit in smallint.
+     Keep the wider type, or fix those rows first.
+
+  24. league: some values of `slug` are longer than 50 characters.
+     Raise `length`, or shorten those rows first.
+
+  25. league: the new primary key (`slug`) has repeated values.
+     Fix those rows first.
+
+  26. player: some rows of `league` point to rows that don't exist in `league`.
+     Fix or delete those rows first.
+
+  27. league: SQL Server has to rebuild the table (about 2500000 rows) to change its identity column.
+     Run `migrate` to confirm it, or raise `rebuild_confirm_rows`.
+
+  28. league: `total` is computed from other columns, and "rebuild table league" would rewrite it.
+     Canyon doesn't change generated columns: change it by hand, or make the field match the database.
+
+  29. league: `points` changes type, and the table has generated columns (`total`, `double`) that may use it.
+     The database refuses that change: drop or change those columns by hand first.
+
+  30. league: `points` would be dropped, and the table has generated columns (`total`) that may use it.
+     Drop or change those columns by hand first.
+
+  31. league: the value given for the existing rows of `points` doesn't fit its type, smallint.
+     Run `migrate` again and give a smallint value.
+
+  32. league: `founded` can't become NOT NULL, some rows have no value, and Canyon can't write a value of its type, datetime.
+     Fill those rows by hand first.
+
+  33. Canyon couldn't plan this change, this is a bug: no such table `league`.
+     Please report it with this message.

@@ -1,7 +1,7 @@
 //! MySQL: DDL commits implicitly, so statements run one by one, outside a transaction.
 //! A schema is a database.
 
-use super::{DdlDialect, DdlWriter, LowerError, TypeSql};
+use super::{DdlDialect, DdlWriter, LowerError, TypeSql, fill_column};
 use super::{actual_column, actual_type, add_foreign_key, desired_type, fk_name, one};
 use super::{is_current_timestamp, known, renamed_constraints, restated, rewritable};
 use crate::model::NativeType;
@@ -14,7 +14,16 @@ use canyon_core::types::SqlType;
 type W = DdlWriter<MySql>;
 
 impl DdlDialect for MySql {
+    const NAME: &'static str = "MySQL";
     const TRANSACTIONAL_DDL: bool = false;
+    const TEXT_KEY_NEEDS_LENGTH: bool = true;
+    const MAX_KEY_LENGTH: Option<u32> = Some(768);
+    const MAX_LENGTH: u32 = 16_383;
+    const MAX_PRECISION: u8 = 6;
+    const MAX_ROW_BYTES: Option<u64> = Some(65_535);
+    const REWRITES_COLUMN: bool = true;
+    const TEXT_PARAM_TYPES: &'static [&'static str] =
+        &["char", "varchar", "tinytext", "text", "mediumtext"];
 
     fn type_sql(ty: SqlType) -> Result<TypeSql, LowerError> {
         Ok(TypeSql::new(match ty {
@@ -123,6 +132,11 @@ impl DdlDialect for MySql {
                     .ident(to);
                 one(w)
             }
+            Op::FillColumn {
+                table,
+                column,
+                value,
+            } => one(fill_column::<Self>(table, column, value)),
             Op::DropColumn { table, column } => {
                 let mut w = W::new();
                 w.raw("ALTER TABLE ")

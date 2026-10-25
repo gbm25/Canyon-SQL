@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mssql.rs
+expression: "render::<MsSql>(&op, &actual(None), \"dbo\")"
+---
+UPDATE [player] SET [age] = @P1 WHERE [age] IS NULL
+  params: [Int(0)]
+  transactional: true

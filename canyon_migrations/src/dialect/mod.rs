@@ -19,15 +19,48 @@ pub use writer::{DdlWriter, TypeSql};
 use crate::model::{CatalogSql, ColumnDef, ColumnDefault, ForeignKey, Ident, Logical};
 use crate::model::{NativeType, PrimaryKey};
 use crate::model::{QualifiedName, TableDef};
-use crate::op::{Ctx, Op, Statement};
+use crate::op::{Ctx, Op, Param, Statement};
 use canyon_core::query::querybuilder::syntax::dialect::SqlDialect;
 use canyon_core::types::SqlType;
 use std::fmt;
 
 /// DDL for one backend. Implemented for the query builder's dialects.
 pub trait DdlDialect: SqlDialect + Sized {
+    /// The backend's name, for messages.
+    const NAME: &'static str;
+
     /// DDL can run inside the plan's transaction (MySQL commits it implicitly).
     const TRANSACTIONAL_DDL: bool;
+
+    /// A text column in a key needs a `length`.
+    const TEXT_KEY_NEEDS_LENGTH: bool = false;
+
+    /// The longest `length` of a text column in a key.
+    const MAX_KEY_LENGTH: Option<u32> = None;
+
+    /// The longest `length` of a text column.
+    const MAX_LENGTH: u32;
+
+    /// The most fractional-second digits of a time or timestamp.
+    const MAX_PRECISION: u8;
+
+    /// The biggest row `CREATE TABLE` takes, as `mysql_row_bytes` counts it (MySQL).
+    const MAX_ROW_BYTES: Option<u64> = None;
+
+    /// `ALTER COLUMN` is refused on a primary key column (SQL Server): the key is dropped
+    /// and added back around a type change.
+    const KEY_COLUMNS_BLOCK_TYPE_CHANGE: bool = false;
+
+    /// Changing a column's type or nullability restates the whole column (SQL Server
+    /// `ALTER COLUMN`, MySQL `MODIFY`), which a generated column doesn't survive.
+    const REWRITES_COLUMN: bool = false;
+
+    /// The type of a column a generated column uses can't change (PostgreSQL, SQL Server).
+    const GENERATED_BLOCKS_BASE_TYPE_CHANGE: bool = false;
+
+    /// Catalog type names (`NativeType::name`) that `to_logical` leaves as `Other` but a
+    /// `Param::Text` binds to, so a fill value can still be given for them.
+    const TEXT_PARAM_TYPES: &'static [&'static str] = &[];
 
     /// The column type Canyon creates for `ty`.
     fn type_sql(ty: SqlType) -> Result<TypeSql, LowerError>;
@@ -210,6 +243,25 @@ pub(crate) fn add_primary_key<D: DdlDialect>(
         .raw(" PRIMARY KEY (")
         .idents(&key.columns)
         .raw(")");
+    w
+}
+
+/// `UPDATE … SET column = value WHERE column IS NULL`, the value bound.
+pub(crate) fn fill_column<D: DdlDialect>(
+    table: &QualifiedName,
+    column: &Ident,
+    value: &Param,
+) -> DdlWriter<D> {
+    let mut w = DdlWriter::new();
+    w.raw("UPDATE ")
+        .qualified(table)
+        .raw(" SET ")
+        .ident(column)
+        .raw(" = ")
+        .param(value.clone())
+        .raw(" WHERE ")
+        .ident(column)
+        .raw(" IS NULL");
     w
 }
 

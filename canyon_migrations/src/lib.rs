@@ -19,6 +19,8 @@ pub mod migrations;
 pub mod model;
 #[doc(hidden)]
 pub mod op;
+#[doc(hidden)]
+pub mod planning;
 
 extern crate canyon_crud;
 extern crate canyon_entities;

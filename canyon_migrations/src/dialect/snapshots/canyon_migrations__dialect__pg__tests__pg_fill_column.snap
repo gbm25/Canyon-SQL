@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/pg.rs
+expression: "render::<PgDialect>(&op, &actual(), \"public\")"
+---
+UPDATE "player" SET "age" = $1 WHERE "age" IS NULL
+  params: [Int(0)]
+  transactional: true

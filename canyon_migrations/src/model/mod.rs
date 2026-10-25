@@ -11,4 +11,6 @@ pub use schema::{
     ColumnDef, ColumnDefault, ColumnExtra, ForeignKey, Generated, PrimaryKey, SchemaModel,
     TableDef, TableDefBuilder,
 };
-pub use types::{CatalogSql, Compat, Length, Logical, NativeType, compat};
+pub use types::{
+    CatalogSql, Compat, Length, Logical, NativeType, compat, sql_type_words, type_words,
+};

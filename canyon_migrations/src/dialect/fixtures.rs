@@ -2,7 +2,7 @@
 
 use super::DdlDialect;
 use crate::model::*;
-use crate::op::{Ctx, Op, ServerVersion};
+use crate::op::{Ctx, Op, Param, ServerVersion};
 use canyon_core::types::SqlType;
 
 pub fn q(s: &str) -> QualifiedName {
@@ -216,6 +216,14 @@ pub fn all_ops() -> Vec<(&'static str, Op)> {
             Op::DropForeignKey {
                 table: t.clone(),
                 name: Ident::from_catalog("player_league_fkey"),
+            },
+        ),
+        (
+            "fill_column",
+            Op::FillColumn {
+                table: t.clone(),
+                column: id("age"),
+                value: Param::Int(0),
             },
         ),
         ("create_schema", Op::CreateSchema { schema: id("s") }),

@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/planning/conflict.rs
+expression: "format!(\"{i}\\n{w}\\n{}\", Info::Unmanaged { table: q(\"old_t\") })"
+---
+info: t.c is text, the field needs text(10). It works; `migrate` can tighten it.
+warning: t.c is text(100), smaller than text for the field. Values that don't fit will fail on insert.
+info: table `old_t` has no entity anymore. Canyon left it as it is; `migrate` can drop it.

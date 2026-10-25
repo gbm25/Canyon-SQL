@@ -1,6 +1,6 @@
 //! PostgreSQL: one transaction per plan, identity with `GENERATED ALWAYS`.
 
-use super::{DdlDialect, DdlWriter, LowerError, TypeSql};
+use super::{DdlDialect, DdlWriter, LowerError, TypeSql, fill_column};
 use super::{add_foreign_key, add_primary_key, desired_type, drop_constraint, fk_name, one};
 use super::{known, pk_name, renamed_constraints, restated};
 use crate::model::{ColumnDef, Ident, Length, Logical, NativeType, QualifiedName, TableDef};
@@ -11,7 +11,13 @@ use canyon_core::types::SqlType;
 type W = DdlWriter<PgDialect>;
 
 impl DdlDialect for PgDialect {
+    const NAME: &'static str = "PostgreSQL";
     const TRANSACTIONAL_DDL: bool = true;
+    const MAX_LENGTH: u32 = 10_485_760;
+    const MAX_PRECISION: u8 = 6;
+    const GENERATED_BLOCKS_BASE_TYPE_CHANGE: bool = true;
+    // tokio-postgres binds a String to these too
+    const TEXT_PARAM_TYPES: &'static [&'static str] = &["bpchar", "citext"];
 
     fn type_sql(ty: SqlType) -> Result<TypeSql, LowerError> {
         Ok(TypeSql::new(match ty {
@@ -106,6 +112,11 @@ impl DdlDialect for PgDialect {
                     .ident(to);
                 one(w)
             }
+            Op::FillColumn {
+                table,
+                column,
+                value,
+            } => one(fill_column::<Self>(table, column, value)),
             Op::DropColumn { table, column } => {
                 let mut w = W::new();
                 w.raw("ALTER TABLE ")

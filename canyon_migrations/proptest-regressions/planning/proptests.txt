@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 645d3e32fe87276566bde2c2f8494e97ad4e94c8ab81b111902db27979cf1f68 # shrinks to s =    desired     s1.t0 Some("E0") (id Int?, c0 Bool!)     s1.t1 Some("E1") (id Int!, c0 Bool!) pk[id]+ None   actual     t1 None (id Int!, c0 Bool!)     s1.t0 None (c0 Bool!)   previous snapshot     t1 Some("E1") (id Int!, c0 Bool!)     s1.t0 Some("E0") (c0 Bool!), allow = false, counts = [1, 0, 0, 0]
