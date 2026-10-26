@@ -13,10 +13,13 @@ Year format is defined as: `YYYY-m-d`
 
 - `ColumnType` and `SqlType` in `canyon_sql::core`: the column type each Rust field type maps to
 - `QueryParameter` for `Option<i16>` and `Option<bool>`
+- `migrations` table in `canyon.toml` for a datasource, with `enabled`, `allow_destructive`, `rebuild_confirm_rows` and `lock_timeout_secs`. `migrations = 'enabled'` keeps working; an unknown key in the table is an error
+- `canyon_migration_history` table: one row per migration statement. When a statement fails, `error` keeps Canyon's message and the database's error code (SQLSTATE on PostgreSQL, error number on SQL Server and MySQL), never the database's own text
 
 ### Changed
 
 - `canyon_core::column::NativeColumnType` is `#[non_exhaustive]` (its variants depend on the enabled features): a `match` needs a `_` arm
+- `canyon_core::connection::datasources::Migrations` is now `Simple(MigrationsSwitch)` or `Full(MigrationsConfig)`: `Migrations::Enabled` is `Migrations::Simple(MigrationsSwitch::Enabled)`
 
 ### Deprecated
 

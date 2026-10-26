@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mysql.rs
+expression: show(&st)
+---
+SELECT CAST(EXISTS (SELECT 1 FROM `player` WHERE `age` < ? OR `age` > ?) AS SIGNED)
+  params: [BigInt(-128), BigInt(127)]
+  transactional: true

@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mssql.rs
+expression: show(&st)
+---
+DECLARE @r int; EXEC @r = sp_getapplock @Resource = @P1, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 0; SELECT CAST(CASE WHEN @r >= 0 THEN 1 ELSE 0 END AS BIGINT)
+  params: [Text("canyon_migrations")]
+  transactional: true

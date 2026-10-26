@@ -1,0 +1,23 @@
+---
+source: canyon_migrations/src/interactive.rs
+expression: "text.join(\"\\n---\\n\")"
+---
+pg: table `player` is gone. Was it renamed?
+  [1] rename player → athlete (keeps the data)
+  [2] rename player → sport.athlete (keeps the data)
+  [3] not a rename: leave `player` as it is
+  [a] abort
+> 
+---
+pg / player: column `age` (integer) was removed and `birth_date` (date), `nick` (text(20)) added.
+  [1] rename age → birth_date (converts the data)
+  [2] rename age → nick (converts the data)
+  [3] drop age (its data is lost), the added columns start empty
+  [a] abort
+> 
+---
+pg: drop column player.age. Go ahead? [y/N, a to abort] 
+---
+pg: rebuild table player (about 250000 rows). Go ahead? [y/N, a to abort] 
+---
+pg / player.name is text, the field needs text(50). Tighten it? [y/N, a to abort]

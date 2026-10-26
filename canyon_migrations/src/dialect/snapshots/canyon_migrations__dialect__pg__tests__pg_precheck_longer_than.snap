@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/pg.rs
+expression: show(&st)
+---
+SELECT CAST(CASE WHEN EXISTS (SELECT 1 FROM "player" WHERE pg_catalog.char_length(pg_catalog.rtrim("name")) > $1) THEN 1 ELSE 0 END AS BIGINT)
+  params: [Int(50)]
+  transactional: true

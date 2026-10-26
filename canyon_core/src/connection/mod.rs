@@ -27,6 +27,7 @@ pub mod contracts;
 pub mod database_type;
 pub mod datasources;
 pub mod db_connector;
+pub mod session;
 
 use crate::canyon::Canyon;
 use crate::connection::contracts::DbConnection;

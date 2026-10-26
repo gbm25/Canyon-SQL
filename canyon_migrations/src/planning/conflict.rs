@@ -263,7 +263,7 @@ pub enum Conflict {
         column: Ident,
         generated: Vec<Ident>,
     },
-    /// The value given for the existing rows doesn't fit the column's type.
+    /// The value set in the decisions for the existing rows doesn't fit the column's type.
     FillValueType {
         table: QualifiedName,
         column: Ident,
@@ -337,11 +337,11 @@ impl fmt::Display for Conflict {
             ),
             Self::NotNullOnTableWithRows { table, column } => write!(
                 f,
-                "{table}: new column `{column}` is NOT NULL and the table has rows.\n     Make the field an `Option`, or run `migrate` to give a value for the existing rows."
+                "{table}: new column `{column}` is NOT NULL and the table has rows.\n     Make the field an `Option`, or add the column as nullable, fill the rows by hand, then make it NOT NULL."
             ),
             Self::NullsBlockNotNull { table, column } => write!(
                 f,
-                "{table}: `{column}` can't become NOT NULL, some rows have no value.\n     Fill them first, or run `migrate` to give a value."
+                "{table}: `{column}` can't become NOT NULL, some rows have no value.\n     Fill those rows by hand first, or keep the field an `Option`."
             ),
             Self::ValuesOutOfRange { table, column, to } => write!(
                 f,
@@ -405,7 +405,7 @@ impl fmt::Display for Conflict {
                 expected,
             } => write!(
                 f,
-                "{table}: the value given for the existing rows of `{column}` doesn't fit its type, {}.\n     Run `migrate` again and give a {} value.",
+                "{table}: the value set for the existing rows of `{column}` in the code doesn't fit its type, {}.\n     Set a {} value.",
                 type_words(expected),
                 type_words(expected)
             ),

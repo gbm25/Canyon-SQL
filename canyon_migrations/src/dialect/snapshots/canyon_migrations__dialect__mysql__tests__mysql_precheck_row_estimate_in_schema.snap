@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mysql.rs
+expression: show(&st)
+---
+SELECT CAST(COALESCE(MAX(TABLE_ROWS), 0) AS SIGNED) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+  params: [Text("sports"), Text("player")]
+  transactional: true

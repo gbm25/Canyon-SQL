@@ -506,3 +506,85 @@ fn desired(name: &str, ty: SqlType) -> ColumnDef {
         extra: ColumnExtra::default(),
     }
 }
+
+/// One of each precheck, on `player`.
+pub fn all_prechecks() -> Vec<(&'static str, crate::planning::diff::Precheck)> {
+    use crate::planning::diff::KeyValue;
+    use crate::planning::diff::Precheck::*;
+    vec![
+        ("table_has_rows", TableHasRows(q("player"))),
+        (
+            "non_null",
+            NonNull {
+                table: q("player"),
+                columns: vec![id("league"), id("age")],
+            },
+        ),
+        (
+            "has_nulls",
+            HasNulls {
+                table: q("player"),
+                column: id("age"),
+            },
+        ),
+        (
+            "out_of_range",
+            OutOfRange {
+                table: q("player"),
+                column: id("age"),
+                min: -128,
+                max: 127,
+            },
+        ),
+        (
+            "longer_than",
+            LongerThan {
+                table: q("player"),
+                column: id("name"),
+                max_len: 50,
+            },
+        ),
+        (
+            "duplicates",
+            Duplicates {
+                table: q("player"),
+                columns: vec![id("name"), id("age")],
+            },
+        ),
+        (
+            "orphans",
+            Orphans {
+                table: q("player"),
+                columns: vec![id("league")],
+                target: q("league"),
+                target_columns: vec![id("id")],
+            },
+        ),
+        (
+            "filled_orphans",
+            FilledOrphans {
+                table: q("player"),
+                target: q("league"),
+                columns: vec![
+                    (KeyValue::Column(id("season")), id("season")),
+                    (
+                        KeyValue::ColumnOrFill(id("division"), crate::op::Param::Text("a".into())),
+                        id("division"),
+                    ),
+                    (KeyValue::Fill(crate::op::Param::Int(7)), id("id")),
+                ],
+            },
+        ),
+        ("row_count", RowCount(q("player"))),
+        ("row_count_in_schema", RowCount(q("sports.player"))),
+        ("row_estimate", RowEstimate(q("player"))),
+        ("row_estimate_in_schema", RowEstimate(q("sports.player"))),
+    ]
+}
+
+pub fn show(s: &crate::op::Statement) -> String {
+    format!(
+        "{}\n  params: {:?}\n  transactional: {}",
+        s.sql, s.params, s.transactional
+    )
+}

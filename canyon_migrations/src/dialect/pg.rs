@@ -1,14 +1,19 @@
 //! PostgreSQL: one transaction per plan, identity with `GENERATED ALWAYS`.
 
+use super::restated;
 use super::{DdlDialect, DdlWriter, LowerError, TypeSql, fill_column};
+use super::{SNAPSHOT_TABLE, exists_body, known, length_param, pk_name, renamed_constraints};
 use super::{add_foreign_key, add_primary_key, desired_type, drop_constraint, fk_name, one};
-use super::{known, pk_name, renamed_constraints, restated};
 use crate::model::{ColumnDef, Ident, Length, Logical, NativeType, QualifiedName, TableDef};
 use crate::op::{Ctx, Op, Param, Statement};
+use crate::planning::diff::Precheck;
 use canyon_core::query::querybuilder::syntax::dialect::PgDialect;
 use canyon_core::types::SqlType;
 
 type W = DdlWriter<PgDialect>;
+
+/// The advisory lock key: "canyon" as a number.
+const LOCK_KEY: i64 = 0x6361_6e79_6f6e;
 
 impl DdlDialect for PgDialect {
     const NAME: &'static str = "PostgreSQL";
@@ -53,6 +58,78 @@ impl DdlDialect for PgDialect {
     // E'…' reads backslashes the same whatever `standard_conforming_strings` says
     fn text_literal(value: &str) -> String {
         format!("E'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
+    }
+
+    // An `int2` column rejects both `i32` and `i64`: the cast makes the bound value `bigint`
+    fn bigint_param(w: &mut DdlWriter<Self>, value: i64) {
+        w.raw("CAST(")
+            .param(Param::BigInt(value))
+            .raw(" AS bigint)");
+    }
+
+    fn precheck(p: &Precheck, _default_schema: &str) -> Statement {
+        let mut w = W::new();
+        match p {
+            Precheck::RowEstimate(table) => {
+                // -1 is "never analyzed"; no row at all is a missing table
+                let mut name = W::new();
+                name.qualified(table);
+                w.raw("SELECT CAST(GREATEST(COALESCE((SELECT reltuples FROM pg_catalog.pg_class ")
+                    .raw("WHERE oid = pg_catalog.to_regclass(")
+                    .param(Param::Text(name.into_sql()))
+                    .raw(")), 0), 0) AS BIGINT)");
+            }
+            Precheck::RowCount(table) => {
+                w.raw("SELECT CAST(pg_catalog.count(*) AS BIGINT) FROM (SELECT 1 FROM ")
+                    .qualified(table)
+                    .raw(" LIMIT 2) AS canyon_r");
+            }
+            p => {
+                w.raw("SELECT CAST(CASE WHEN EXISTS (");
+                if let Precheck::LongerThan {
+                    table,
+                    column,
+                    max_len,
+                } = p
+                {
+                    // trailing spaces don't count: ALTER COLUMN trims them when it shrinks
+                    w.raw("SELECT 1 FROM ")
+                        .qualified(table)
+                        .raw(" WHERE pg_catalog.char_length(pg_catalog.rtrim(")
+                        .ident(column)
+                        .raw(")) > ")
+                        .param(length_param(*max_len));
+                } else {
+                    exists_body(&mut w, p);
+                }
+                w.raw(") THEN 1 ELSE 0 END AS BIGINT)");
+            }
+        }
+        w.finish_with(true)
+    }
+
+    fn try_lock() -> Statement {
+        let mut w = W::new();
+        w.raw("SELECT CAST(CASE WHEN pg_catalog.pg_try_advisory_lock(")
+            .param(Param::BigInt(LOCK_KEY))
+            .raw(") THEN 1 ELSE 0 END AS BIGINT)");
+        w.finish_with(true)
+    }
+
+    fn unlock() -> Statement {
+        let mut w = W::new();
+        w.raw("SELECT pg_catalog.pg_advisory_unlock(")
+            .param(Param::BigInt(LOCK_KEY))
+            .raw(")");
+        w.finish_with(true)
+    }
+
+    fn latest_snapshot() -> Statement {
+        let mut w = W::new();
+        w.raw("SELECT model FROM ")
+            .ident(&Ident::from_catalog(SNAPSHOT_TABLE))
+            .raw(" ORDER BY id DESC LIMIT 1");
+        w.finish_with(true)
     }
 
     fn lower(op: &Op, ctx: &Ctx<'_>) -> Result<Vec<Statement>, LowerError> {
@@ -141,7 +218,13 @@ impl DdlDialect for PgDialect {
                 {
                     w.raw(" COLLATE ").catalog_sql(&collation);
                 }
-                w.raw(" USING ").ident(&column.name).raw("::").ty(&ty);
+                // An explicit cast to varchar(n) cuts longer values without a word. Cast
+                // to text and let the column's assignment cast refuse them
+                w.raw(" USING ").ident(&column.name).raw("::");
+                match known(column)? {
+                    SqlType::Text { max_len: Some(_) } => w.raw("text"),
+                    _ => w.ty(&ty),
+                };
                 one(w)
             }
             Op::SetNotNull { table, column } | Op::DropNotNull { table, column } => {
@@ -289,6 +372,61 @@ mod tests {
             None,
         )])
         .unwrap()
+    }
+
+    /// Every function call goes through `pg_catalog.`, and so does `pg_class`.
+    #[test]
+    fn precheck_lock_and_snapshot_functions_are_qualified() {
+        let mut all: Vec<Statement> = all_prechecks()
+            .iter()
+            .map(|(_, p)| PgDialect::precheck(p, "public"))
+            .collect();
+        all.extend([
+            PgDialect::try_lock(),
+            PgDialect::unlock(),
+            PgDialect::latest_snapshot(),
+        ]);
+        for st in all {
+            for name in [
+                "char_length(",
+                "rtrim(",
+                "to_regclass(",
+                "pg_try_advisory_lock(",
+                "pg_advisory_unlock(",
+                "pg_class",
+                "current_schema(",
+                "current_setting(",
+            ] {
+                for (at, _) in st.sql.match_indices(name) {
+                    assert!(
+                        st.sql[..at].ends_with("pg_catalog."),
+                        "unqualified {name} in {}",
+                        st.sql
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn precheck_snapshots() {
+        for (name, p) in all_prechecks() {
+            let st = PgDialect::precheck(&p, "main");
+            assert!(st.transactional);
+            insta::assert_snapshot!(format!("pg_precheck_{name}"), show(&st));
+        }
+    }
+
+    #[test]
+    fn lock_and_snapshot_snapshots() {
+        for (name, st) in [
+            ("try_lock", PgDialect::try_lock()),
+            ("unlock", PgDialect::unlock()),
+            ("latest_snapshot", PgDialect::latest_snapshot()),
+        ] {
+            assert!(st.transactional);
+            insta::assert_snapshot!(format!("pg_{name}"), show(&st));
+        }
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{Config, NoTls};
 
-type PgManager = PostgresConnectionManager<NoTls>;
+pub(crate) type PgManager = PostgresConnectionManager<NoTls>;
 type PostgresConnectionPool = Arc<bb8::Pool<PgManager>>;
 
 /// A connector with a `PostgreSQL` database
@@ -29,6 +29,14 @@ impl PostgresConnector {
             .await
             .map_err(|source| ConnectionError::postgres_pool(source).into())
     }
+
+    /// A new connection outside the pool: dropping it ends the server session.
+    pub(crate) async fn dedicated(&self) -> CanyonResult<tokio_postgres::Client> {
+        self.0
+            .dedicated_connection()
+            .await
+            .map_err(|source| ConnectionError::postgres(source).into())
+    }
 }
 
 impl DbConnection for PostgresConnector {
@@ -37,13 +45,7 @@ impl DbConnection for PostgresConnector {
         stmt: &str,
         params: &[&'_ dyn QueryParameter],
     ) -> CanyonResult<CanyonRows> {
-        let r = self
-            .get_pooled()
-            .await?
-            .query(stmt, &get_psql_params(params))
-            .await
-            .map_err(QueryError::postgres)?;
-        Ok(CanyonRows::Postgres(r))
+        pg_ops::query_rows(&*self.get_pooled().await?, stmt, params).await
     }
 
     async fn query<S, R>(&self, stmt: S, params: &[&dyn QueryParameter]) -> CanyonResult<Vec<R>>
@@ -52,14 +54,12 @@ impl DbConnection for PostgresConnector {
         R: RowMapper,
         Vec<R>: FromIterator<<R as RowMapper>::Output>,
     {
-        self.get_pooled()
-            .await?
-            .query(stmt.as_ref(), &get_psql_params(params))
-            .await
-            .map_err(QueryError::postgres)?
-            .iter()
-            .map(R::deserialize_postgresql)
-            .collect()
+        Ok(
+            pg_ops::query::<R>(&*self.get_pooled().await?, stmt.as_ref(), params)
+                .await?
+                .into_iter()
+                .collect(),
+        )
     }
 
     async fn query_one<R>(
@@ -70,14 +70,7 @@ impl DbConnection for PostgresConnector {
     where
         R: RowMapper,
     {
-        let result = self
-            .get_pooled()
-            .await?
-            .query_opt(stmt, &get_psql_params(params))
-            .await
-            .map_err(QueryError::postgres)?;
-
-        result.as_ref().map(R::deserialize_postgresql).transpose()
+        pg_ops::query_one::<R>(&*self.get_pooled().await?, stmt, params).await
     }
 
     async fn query_one_for<T: FromSqlOwnedValue>(
@@ -85,9 +78,66 @@ impl DbConnection for PostgresConnector {
         stmt: &str,
         params: &[&'_ dyn QueryParameter],
     ) -> CanyonResult<T> {
-        let r = self
-            .get_pooled()
-            .await?
+        pg_ops::query_one_for::<T>(&*self.get_pooled().await?, stmt, params).await
+    }
+
+    async fn execute(&self, stmt: &str, params: &[&dyn QueryParameter]) -> CanyonResult<u64> {
+        pg_ops::execute(&*self.get_pooled().await?, stmt, params).await
+    }
+
+    fn get_database_type(&self) -> CanyonResult<DatabaseType> {
+        Ok(DatabaseType::PostgreSql)
+    }
+}
+
+/// The client operations over a single connection, so a caller holding one
+/// connection can run them without going through the pool.
+pub(crate) mod pg_ops {
+    use super::*;
+
+    pub(crate) async fn query_rows(
+        c: &tokio_postgres::Client,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<CanyonRows> {
+        let rows = c
+            .query(stmt, &get_psql_params(params))
+            .await
+            .map_err(QueryError::postgres)?;
+        Ok(CanyonRows::Postgres(rows))
+    }
+
+    pub(crate) async fn query<R: RowMapper>(
+        c: &tokio_postgres::Client,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<Vec<R::Output>> {
+        c.query(stmt, &get_psql_params(params))
+            .await
+            .map_err(QueryError::postgres)?
+            .iter()
+            .map(R::deserialize_postgresql)
+            .collect()
+    }
+
+    pub(crate) async fn query_one<R: RowMapper>(
+        c: &tokio_postgres::Client,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<Option<R::Output>> {
+        let result = c
+            .query_opt(stmt, &get_psql_params(params))
+            .await
+            .map_err(QueryError::postgres)?;
+        result.as_ref().map(R::deserialize_postgresql).transpose()
+    }
+
+    pub(crate) async fn query_one_for<T: FromSqlOwnedValue>(
+        c: &tokio_postgres::Client,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<T> {
+        let r = c
             .query_opt(stmt, &get_psql_params(params))
             .await
             .map_err(QueryError::postgres)?
@@ -96,16 +146,14 @@ impl DbConnection for PostgresConnector {
             .map_err(|source| QueryError::postgres(source).into())
     }
 
-    async fn execute(&self, stmt: &str, params: &[&dyn QueryParameter]) -> CanyonResult<u64> {
-        self.get_pooled()
-            .await?
-            .execute(stmt, &get_psql_params(params))
+    pub(crate) async fn execute(
+        c: &tokio_postgres::Client,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<u64> {
+        c.execute(stmt, &get_psql_params(params))
             .await
             .map_err(|source| QueryError::postgres(source).into())
-    }
-
-    fn get_database_type(&self) -> CanyonResult<DatabaseType> {
-        Ok(DatabaseType::PostgreSql)
     }
 }
 

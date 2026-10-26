@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/pg.rs
+expression: show(&st)
+---
+SELECT CAST(pg_catalog.count(*) AS BIGINT) FROM (SELECT 1 FROM "sports"."player" LIMIT 2) AS canyon_r
+  params: []
+  transactional: true

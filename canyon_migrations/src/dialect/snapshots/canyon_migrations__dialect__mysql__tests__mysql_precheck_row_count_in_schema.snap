@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mysql.rs
+expression: show(&st)
+---
+SELECT CAST(COUNT(*) AS SIGNED) FROM (SELECT 1 FROM `sports`.`player` LIMIT 2) AS canyon_r
+  params: []
+  transactional: true

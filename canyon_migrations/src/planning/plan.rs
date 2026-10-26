@@ -13,7 +13,8 @@ use crate::op::{ConfirmKey, Op, Param, rebuild_description};
 use canyon_core::types::SqlType;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// What each precheck found: rows (0 = fine), or the estimated rows for `RowEstimate`.
+/// What each precheck found: rows (0 = fine), the rows up to 2 for `RowCount`, or the
+/// estimated rows for `RowEstimate`.
 #[derive(Debug, Clone, Default)]
 pub struct PrecheckResults(pub BTreeMap<Precheck, u64>);
 
@@ -116,6 +117,7 @@ pub fn finalize<D: DdlDialect>(
         conflicts: &mut conflicts,
         large: BTreeSet::new(),
         filled: BTreeSet::new(),
+        rows: BTreeMap::new(),
         blocked: Ops::new(),
     };
     for change in changes {
@@ -169,6 +171,8 @@ struct Decide<'a> {
     /// Columns that get a fill value: new ones on a table with rows, and existing ones
     /// made NOT NULL over their NULLs.
     filled: BTreeSet<(QualifiedName, Ident)>,
+    /// `RowCount` of each table a new key is added to, by its name after the renames.
+    rows: BTreeMap<QualifiedName, u64>,
     /// Ops held back until the user decides. Their generated-column conflicts are still
     /// reported, so one round shows every hard conflict.
     blocked: Ops,
@@ -213,6 +217,10 @@ impl Decide<'_> {
                         estimated_rows: found,
                     }
                 }
+                (Precheck::RowCount(_), Op::AddPrimaryKey { table, .. }) => {
+                    self.rows.insert(table.clone(), found);
+                    continue;
+                }
                 _ if found == 0 => continue,
                 (Precheck::TableHasRows(_), Op::AddColumn { table, column }) => {
                     keep = false;
@@ -251,7 +259,10 @@ impl Decide<'_> {
                     continue;
                 }
                 (
-                    Precheck::TableHasRows(_) | Precheck::NonNull { .. } | Precheck::Orphans { .. },
+                    Precheck::TableHasRows(_)
+                    | Precheck::NonNull { .. }
+                    | Precheck::Orphans { .. }
+                    | Precheck::FilledOrphans { .. },
                     Op::AddForeignKey { table, key },
                 ) => {
                     keep = false;
@@ -360,12 +371,14 @@ impl Decide<'_> {
 
     /// A fill writes one value on every row it touches, so a new key with any filled
     /// column can repeat as soon as there are two rows (the `Duplicates` precheck ran on
-    /// the rows before the fill). The row precheck is an `EXISTS`: any rows count.
+    /// the rows before the fill). One row is fine; a key without a `RowCount` counts as
+    /// many rows.
     fn repeated_fill(&mut self, ops: &Ops) {
         let found = ops.iter().filter_map(|(op, _)| match op {
             Op::AddPrimaryKey { table, key }
-                if (key.columns.iter())
-                    .any(|c| self.filled.contains(&(table.clone(), c.clone()))) =>
+                if self.rows.get(table).is_none_or(|&n| n > 1)
+                    && (key.columns.iter())
+                        .any(|c| self.filled.contains(&(table.clone(), c.clone()))) =>
             {
                 Some(Conflict::DuplicateKeyValues {
                     table: table.clone(),
@@ -395,7 +408,7 @@ fn unexpected(p: &Precheck, op: &Op) -> Conflict {
 
 /// The value binds to the column as it is when `FillColumn` runs (phase 4, before any
 /// type change). An `Other` column here is one of the dialect's `TEXT_PARAM_TYPES`.
-fn fits(value: &Param, ty: &Logical) -> bool {
+pub(super) fn fits(value: &Param, ty: &Logical) -> bool {
     let within =
         |s: &str, max_len: Option<u32>| max_len.is_none_or(|n| s.chars().count() <= n as usize);
     let ty = match ty {
@@ -504,18 +517,28 @@ fn has(ops: &Ops, f: impl Fn(&Op) -> bool) -> bool {
     ops.iter().any(|(op, _)| f(op))
 }
 
-/// Step 2. FK sides must keep equal types while they change (MySQL), SQL Server refuses
-/// `ALTER COLUMN` on a key column, and no database drops a key an FK uses: drop those
-/// keys first and add them back after.
+/// Step 2. FK sides must keep equal types while they change (MySQL), MySQL won't add or
+/// drop an identity on a column an FK uses, SQL Server refuses `ALTER COLUMN` on a key
+/// column, and no database drops a key an FK uses: drop those keys first and add them
+/// back after.
 fn add_key_dependents<D: DdlDialect>(model: &SchemaModel, names: Names<'_>, ops: &mut Ops) {
-    let changed: Vec<(QualifiedName, Ident)> = (ops.iter())
+    // The bool is a type change (not an identity one)
+    let changed: Vec<(QualifiedName, Ident, bool)> = (ops.iter())
         .filter_map(|(op, _)| match op {
-            Op::AlterColumnType { table, column } => Some((table.clone(), column.name.clone())),
+            Op::AlterColumnType { table, column } => {
+                Some((table.clone(), column.name.clone(), true))
+            }
+            Op::AddIdentity { table, column } | Op::DropIdentity { table, column }
+                if D::FK_COLUMNS_BLOCK_IDENTITY_CHANGE =>
+            {
+                Some((table.clone(), column.clone(), false))
+            }
             _ => None,
         })
         .collect();
-    for (table, column) in &changed {
-        if D::KEY_COLUMNS_BLOCK_TYPE_CHANGE
+    for (table, column, type_change) in &changed {
+        if *type_change
+            && D::KEY_COLUMNS_BLOCK_TYPE_CHANGE
             && let Some(pk) = model.table(table).and_then(|t| t.primary_key.as_ref())
             && pk.columns.contains(column)
             && !has(
@@ -761,7 +784,7 @@ fn generated_conflicts<D: DdlDialect>(
 mod tests {
     use super::*;
     use crate::model::*;
-    use crate::planning::diff::diff;
+    use crate::planning::diff::{KeyValue, diff};
     use crate::planning::rename::{Previous, Renames};
     use crate::planning::test_support::{id, introspected, q};
     use canyon_core::query::querybuilder::syntax::dialect::{MsSql, MySql, PgDialect};
@@ -1441,6 +1464,166 @@ mod tests {
     }
 
     #[test]
+    fn a_fill_value_for_a_new_foreign_key_must_exist_in_the_target() {
+        // league has rows; the new NOT NULL `team` gets 7 on every row, and `team` exists
+        let mut want = league();
+        want.columns
+            .push(plain("x", &[("team", Int, false)]).columns.remove(0));
+        want.foreign_keys = vec![ForeignKey {
+            name: None,
+            columns: vec![id("team")],
+            ref_table: q("team"),
+            ref_columns: vec![id("id")],
+        }];
+        let desired = models(vec![want, team()]);
+        let actual = models(vec![introspected(league()), introspected(team())]);
+        let mut decisions = Decisions::default();
+        decisions
+            .fill_values
+            .insert((q("league"), id("team")), Param::Int(7));
+        let out = diff(
+            &desired,
+            &actual,
+            &Previous::Synthesized(actual.clone()),
+            &Renames::default(),
+            &decisions,
+        );
+        let missing = Precheck::FilledOrphans {
+            table: q("league"),
+            target: q("team"),
+            columns: vec![(KeyValue::Fill(Param::Int(7)), id("id"))],
+        };
+        let add = (out.changes.iter())
+            .find(|c| matches!(c.op, Op::AddForeignKey { .. }))
+            .unwrap();
+        assert_eq!(add.prechecks, std::slice::from_ref(&missing));
+
+        let rows = (Precheck::TableHasRows(q("league")), 1);
+        let err = run::<PgDialect>(
+            &desired,
+            &actual,
+            &results(&[rows.clone(), (missing.clone(), 1)]),
+            &decisions,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            [Conflict::OrphanRows {
+                table: q("league"),
+                columns: vec![id("team")],
+                target: q("team"),
+            }]
+        );
+
+        // The target has 7: added nullable, filled, made NOT NULL, then the key
+        let plan = run::<PgDialect>(&desired, &actual, &results(&[rows]), &decisions).unwrap();
+        let kinds: Vec<&str> = plan.ops.iter().map(|p| p.op.kind()).collect();
+        assert_eq!(
+            kinds,
+            ["AddColumn", "FillColumn", "SetNotNull", "AddForeignKey"]
+        );
+
+        // No value yet, or one of another type: nothing to ask, the plan stops anyway
+        for decisions in [Decisions::default(), {
+            let mut d = Decisions::default();
+            d.fill_values
+                .insert((q("league"), id("team")), Param::Text("7".into()));
+            d
+        }] {
+            let out = diff(
+                &desired,
+                &actual,
+                &Previous::Synthesized(actual.clone()),
+                &Renames::default(),
+                &decisions,
+            );
+            assert!((out.changes.iter()).all(|c| {
+                !c.prechecks
+                    .iter()
+                    .any(|p| matches!(p, Precheck::FilledOrphans { .. }))
+            }));
+        }
+    }
+
+    #[test]
+    fn nulls_filled_under_a_new_foreign_key_must_find_the_value() {
+        // league.team exists, nullable, with NULLs; it becomes NOT NULL with 7 over the
+        // NULLs and gets a key to the existing `team`
+        let team_col = |nullable| plain("x", &[("team", Int, nullable)]).columns.remove(0);
+        let mut have = introspected(league());
+        have.columns.push(team_col(true));
+        let mut want = league();
+        want.columns.push(team_col(false));
+        want.foreign_keys = vec![ForeignKey {
+            name: None,
+            columns: vec![id("team")],
+            ref_table: q("team"),
+            ref_columns: vec![id("id")],
+        }];
+        let desired = models(vec![want, team()]);
+        let actual = models(vec![have, introspected(team())]);
+        let mut decisions = Decisions::default();
+        decisions
+            .fill_values
+            .insert((q("league"), id("team")), Param::Int(7));
+        let out = diff(
+            &desired,
+            &actual,
+            &Previous::Synthesized(actual.clone()),
+            &Renames::default(),
+            &decisions,
+        );
+        let missing = Precheck::FilledOrphans {
+            table: q("league"),
+            target: q("team"),
+            columns: vec![(KeyValue::ColumnOrFill(id("team"), Param::Int(7)), id("id"))],
+        };
+        let add = (out.changes.iter())
+            .find(|c| matches!(c.op, Op::AddForeignKey { .. }))
+            .unwrap();
+        assert_eq!(add.prechecks, std::slice::from_ref(&missing));
+
+        let nulls = (
+            Precheck::HasNulls {
+                table: q("league"),
+                column: id("team"),
+            },
+            1,
+        );
+        let err = run::<PgDialect>(
+            &desired,
+            &actual,
+            &results(&[nulls.clone(), (missing, 1)]),
+            &decisions,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            [Conflict::OrphanRows {
+                table: q("league"),
+                columns: vec![id("team")],
+                target: q("team"),
+            }]
+        );
+        let plan = run::<PgDialect>(&desired, &actual, &results(&[nulls]), &decisions).unwrap();
+        let kinds: Vec<&str> = plan.ops.iter().map(|p| p.op.kind()).collect();
+        assert_eq!(kinds, ["FillColumn", "SetNotNull", "AddForeignKey"]);
+
+        // Without a value the NULL rows aren't asked about (the plan stops on them)
+        let out = diff(
+            &desired,
+            &actual,
+            &Previous::Synthesized(actual.clone()),
+            &Renames::default(),
+            &Decisions::default(),
+        );
+        let add = (out.changes.iter())
+            .find(|c| matches!(c.op, Op::AddForeignKey { .. }))
+            .unwrap();
+        assert!(matches!(add.prechecks[..], [Precheck::Orphans { .. }]));
+    }
+
+    #[test]
     fn rows_found_for_a_foreign_key_are_orphans() {
         // Existing column, new target table: `NonNull`
         let mut have = introspected(league());
@@ -1525,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn a_constant_fill_in_a_new_primary_key_repeats() {
+    fn a_constant_fill_in_a_new_primary_key_repeats_from_two_rows() {
         let actual = models(vec![plain("t", &[("b", Int, false)])]);
         let desired = models(vec![
             TableDef::builder("T", "t")
@@ -1535,20 +1718,31 @@ mod tests {
                 .build()
                 .unwrap(),
         ]);
-        let rows = results(&[(Precheck::TableHasRows(q("t")), 1)]);
-        let err = run::<PgDialect>(
-            &desired,
-            &actual,
-            &rows,
-            &with_fill("t", "id", Param::Int(1)),
-        )
-        .unwrap_err();
+        let fill = with_fill("t", "id", Param::Int(1));
+        let rows = |n| {
+            results(&[
+                (Precheck::TableHasRows(q("t")), 1),
+                (Precheck::RowCount(q("t")), n),
+            ])
+        };
+        let err = run::<PgDialect>(&desired, &actual, &rows(2), &fill).unwrap_err();
         assert_eq!(
             err,
             [Conflict::DuplicateKeyValues {
                 table: q("t"),
                 columns: vec![id("id")]
             }]
+        );
+        // One row can't repeat
+        let plan = run::<PgDialect>(&desired, &actual, &rows(1), &fill).unwrap();
+        assert_eq!(
+            lines(&plan),
+            [
+                "4 add column t.id (integer)",
+                "4 fill empty values of t.id",
+                "7 make t.id NOT NULL",
+                "8 add primary key to t (id)"
+            ]
         );
         // An empty table needs no value at all
         let plan = ok::<PgDialect>(&desired, &actual);
@@ -1723,19 +1917,24 @@ mod tests {
     }
 
     #[test]
-    fn a_fill_over_the_nulls_of_a_new_key_column_repeats() {
-        let nulls = results(&[(
-            Precheck::HasNulls {
-                table: q("t"),
-                column: id("region"),
-            },
-            1,
-        )]);
+    fn a_fill_over_the_nulls_of_a_new_key_column_repeats_from_two_rows() {
+        let nulls = |n| {
+            results(&[
+                (
+                    Precheck::HasNulls {
+                        table: q("t"),
+                        column: id("region"),
+                    },
+                    1,
+                ),
+                (Precheck::RowCount(q("t")), n),
+            ])
+        };
         let fill = with_fill("t", "region", Param::Text("eu".into()));
         // Alone and next to a column that was there already
         for columns in [&["region"][..], &["a", "region"]] {
             let (desired, actual) = keyed_on(columns);
-            let err = run::<PgDialect>(&desired, &actual, &nulls, &fill).unwrap_err();
+            let err = run::<PgDialect>(&desired, &actual, &nulls(2), &fill).unwrap_err();
             assert_eq!(
                 err,
                 [Conflict::DuplicateKeyValues {
@@ -1743,6 +1942,7 @@ mod tests {
                     columns: columns.iter().map(|c| id(c)).collect(),
                 }]
             );
+            assert!(run::<PgDialect>(&desired, &actual, &nulls(1), &fill).is_ok());
         }
         // No NULLs: nothing is filled and the precheck decides
         let (desired, actual) = keyed_on(&["a", "region"]);
@@ -1750,7 +1950,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_filled_column_next_to_an_existing_one_in_a_new_key_repeats() {
+    fn a_new_filled_column_next_to_an_existing_one_in_a_new_key_repeats_from_two_rows() {
         let actual = models(vec![plain("t", &[("a", Int, false)])]);
         let desired = models(vec![
             TableDef::builder("T", "t")
@@ -1767,19 +1967,83 @@ mod tests {
                 })
                 .unwrap(),
         ]);
-        let rows = results(&[(Precheck::TableHasRows(q("t")), 1)]);
-        let err = run::<PgDialect>(
-            &desired,
-            &actual,
-            &rows,
-            &with_fill("t", "b", Param::Int(1)),
-        )
-        .unwrap_err();
+        let fill = with_fill("t", "b", Param::Int(1));
+        let rows = |n| {
+            results(&[
+                (Precheck::TableHasRows(q("t")), 1),
+                (Precheck::RowCount(q("t")), n),
+            ])
+        };
+        let err = run::<PgDialect>(&desired, &actual, &rows(2), &fill).unwrap_err();
         assert_eq!(
             err,
             [Conflict::DuplicateKeyValues {
                 table: q("t"),
                 columns: vec![id("a"), id("b")],
+            }]
+        );
+        let plan = run::<PgDialect>(&desired, &actual, &rows(1), &fill).unwrap();
+        assert_eq!(
+            lines(&plan),
+            [
+                "4 add column t.b (integer)",
+                "4 fill empty values of t.b",
+                "7 make t.b NOT NULL",
+                "8 add primary key to t (a, b)"
+            ]
+        );
+        // The existing column still has to be unique
+        let mut dup = rows(1);
+        dup.0.insert(
+            Precheck::Duplicates {
+                table: q("t"),
+                columns: vec![id("a")],
+            },
+            1,
+        );
+        assert!(run::<PgDialect>(&desired, &actual, &dup, &fill).is_err());
+    }
+
+    #[test]
+    fn a_new_key_over_filled_or_nullable_columns_counts_the_rows() {
+        let actual = models(vec![plain("t", &[("a", Int, false)])]);
+        let keyed = |columns: &[&str], extra: Option<&str>| {
+            let mut b = TableDef::builder("T", "t").column("a", Int, false);
+            if let Some(c) = extra {
+                b = b.column(c, Int, false);
+            }
+            let mut t = b.build().unwrap();
+            t.primary_key = Some(PrimaryKey {
+                name: None,
+                columns: columns.iter().map(|c| id(c)).collect(),
+                generated: None,
+            });
+            models(vec![t])
+        };
+        let key_prechecks = |desired: &SchemaModel| {
+            diff_of(desired, &actual, &Renames::default())
+                .changes
+                .into_iter()
+                .find(|c| matches!(c.op, Op::AddPrimaryKey { .. }))
+                .unwrap()
+                .prechecks
+        };
+        assert_eq!(
+            key_prechecks(&keyed(&["a", "b"], Some("b"))),
+            [
+                Precheck::Duplicates {
+                    table: q("t"),
+                    columns: vec![id("a")],
+                },
+                Precheck::RowCount(q("t")),
+            ]
+        );
+        // Nothing can be filled: no count
+        assert_eq!(
+            key_prechecks(&keyed(&["a"], None)),
+            [Precheck::Duplicates {
+                table: q("t"),
+                columns: vec![id("a")],
             }]
         );
     }
@@ -2162,6 +2426,131 @@ mod tests {
                 "9 rebuild table league",
                 "11 add foreign key player (league) to league",
             ]
+        );
+    }
+
+    // --- MySQL identity under a foreign key ---
+
+    #[test]
+    fn mysql_drops_the_foreign_keys_to_a_column_getting_an_identity() {
+        let (desired, actual) = identity_added();
+        let plan = ok::<MySql>(&desired, &actual);
+        assert_eq!(
+            lines(&plan),
+            [
+                "1 drop foreign key player_league_fkey of player",
+                "9 make league.id generated by the database",
+                "11 add foreign key player (league) to league",
+            ]
+        );
+        assert!(matches!(&plan.ops[2].op, Op::AddForeignKey { key, .. } if key.name.is_none()));
+    }
+
+    #[test]
+    fn mysql_drops_the_foreign_keys_to_a_column_losing_its_identity() {
+        let desired = models(vec![league_with(Int, None), player()]);
+        let actual = models(vec![introspected(league()), introspected(player())]);
+        let plan = ok::<MySql>(&desired, &actual);
+        assert_eq!(
+            lines(&plan),
+            [
+                "1 drop foreign key player_league_fkey of player",
+                "5 stop generating league.id",
+                "11 add foreign key player (league) to league",
+            ]
+        );
+        let plan = ok::<PgDialect>(&desired, &actual);
+        assert_eq!(lines(&plan), ["5 stop generating league.id"]);
+    }
+
+    #[test]
+    fn mysql_drops_the_own_foreign_key_of_a_column_getting_an_identity() {
+        let profile = |generated| {
+            TableDef::builder("Profile", "profile")
+                .column("id", Int, false)
+                .primary_key(generated)
+                .foreign_key("league", "id")
+                .build()
+                .unwrap()
+        };
+        let desired = models(vec![league(), profile(Some(Generated::Identity))]);
+        let actual = models(vec![introspected(league()), introspected(profile(None))]);
+        assert_eq!(
+            lines(&ok::<MySql>(&desired, &actual)),
+            [
+                "1 drop foreign key profile_id_fkey of profile",
+                "9 make profile.id generated by the database",
+                "11 add foreign key profile (id) to league",
+            ]
+        );
+        assert_eq!(
+            lines(&ok::<PgDialect>(&desired, &actual)),
+            ["9 make profile.id generated by the database"]
+        );
+    }
+
+    #[test]
+    fn mysql_identity_change_keeps_a_hand_given_name_and_drops_by_the_old_names() {
+        let desired = models(vec![league(), player_with("gamer", Int)]);
+        let mut have = introspected(player());
+        have.foreign_keys[0].name = Some(id("fk_by_hand"));
+        let actual = models(vec![introspected(league_with(Int, None)), have]);
+        let renames = Renames {
+            tables: vec![(q("player"), q("gamer"))],
+            ..Renames::default()
+        };
+        let plan = finalize::<MySql>(
+            diff_of(&desired, &actual, &renames),
+            &PrecheckResults::default(),
+            &Decisions::default(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            lines(&plan),
+            [
+                "1 drop foreign key fk_by_hand of player",
+                "2 rename table player to gamer",
+                "9 make league.id generated by the database",
+                "11 add foreign key gamer (league) to league",
+            ]
+        );
+        assert!(
+            matches!(&plan.ops[3].op, Op::AddForeignKey { key, .. } if key.name == Some(id("fk_by_hand")))
+        );
+    }
+
+    #[test]
+    fn mysql_identity_and_type_change_drop_the_key_once() {
+        let desired = models(vec![
+            league_with(BigInt, Some(Generated::Identity)),
+            player_with("player", BigInt),
+        ]);
+        let actual = models(vec![
+            introspected(league_with(Int, None)),
+            introspected(player()),
+        ]);
+        assert_eq!(
+            lines(&ok::<MySql>(&desired, &actual)),
+            [
+                "1 drop foreign key player_league_fkey of player",
+                "7 change type of league.id to bigint",
+                "7 change type of player.league to bigint",
+                "9 make league.id generated by the database",
+                "11 add foreign key player (league) to league",
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_keeps_the_foreign_key_through_a_nullability_change() {
+        let desired = models(vec![league(), player_with("player", Int)]);
+        let mut have = player();
+        have.columns[2].nullable = false;
+        let actual = models(vec![introspected(league()), introspected(have)]);
+        assert_eq!(
+            lines(&ok::<MySql>(&desired, &actual)),
+            ["7 make player.league nullable"]
         );
     }
 

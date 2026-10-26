@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mysql.rs
+expression: show(&st)
+---
+SELECT CAST(EXISTS (SELECT 1 FROM `player` WHERE `league` IS NOT NULL AND `age` IS NOT NULL) AS SIGNED)
+  params: []
+  transactional: true

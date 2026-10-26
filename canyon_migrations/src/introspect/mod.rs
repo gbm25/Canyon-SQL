@@ -18,17 +18,15 @@ use crate::op::{Param, ServerVersion, Statement};
 use canyon_core::connection::contracts::DbConnection;
 use canyon_core::connection::database_type::DatabaseType;
 use canyon_core::error::CanyonError;
-use canyon_core::query::parameters::QueryParameter;
 use canyon_core::rows::CanyonRows;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use crate::dialect::SNAPSHOT_TABLE;
+use crate::memory::{HISTORY_TABLE, LEGACY_TABLE};
+
 /// Tables Canyon keeps for itself in the default schema: never part of the user's model.
-pub(crate) const CANYON_TABLES: [&str; 3] = [
-    "canyon_schema_snapshot",
-    "canyon_migration_history",
-    "canyon_memory",
-];
+pub(crate) const CANYON_TABLES: [&str; 3] = [SNAPSHOT_TABLE, HISTORY_TABLE, LEGACY_TABLE];
 
 /// One column as a catalog reports it.
 #[derive(Debug, Clone)]
@@ -74,6 +72,9 @@ pub struct Catalog {
     pub existing_schemas: Vec<Ident>,
     /// MySQL's `NO_BACKSLASH_ESCAPES` sql_mode; always false on the other backends.
     pub no_backslash_escapes: bool,
+    /// Which of Canyon's own tables exist in the default schema, sorted. They are not in
+    /// `model`.
+    pub canyon_tables: Vec<String>,
     pub model: SchemaModel,
 }
 
@@ -211,6 +212,13 @@ async fn read<R: Reader>(
             .map(|name| Ident::from_catalog(name))
             .collect()
     };
+    let mut canyon_tables: Vec<String> = columns
+        .iter()
+        .filter(|c| c.schema == session.default_schema && CANYON_TABLES.contains(&c.table.as_str()))
+        .map(|c| c.table.clone())
+        .collect();
+    canyon_tables.sort();
+    canyon_tables.dedup();
     let model = build_model(
         &session.default_schema,
         columns,
@@ -222,6 +230,7 @@ async fn read<R: Reader>(
         default_schema: session.default_schema,
         existing_schemas,
         no_backslash_escapes: session.no_backslash_escapes,
+        canyon_tables,
         model,
     })
 }
@@ -232,9 +241,7 @@ async fn run(
     statement: &Statement,
     stage: &'static str,
 ) -> Result<CanyonRows, IntrospectError> {
-    let params: Vec<&dyn QueryParameter> =
-        statement.params.iter().map(Param::as_query_param).collect();
-    conn.query_rows(&statement.sql, &params)
+    conn.query_rows(&statement.sql, &statement.query_params())
         .await
         .map_err(|source| IntrospectError::Query { stage, source })
 }

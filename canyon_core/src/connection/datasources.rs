@@ -143,6 +143,14 @@ impl DatasourceConfig {
             .is_some_and(|migrations| migrations.has_migrations_enabled())
     }
 
+    /// Migration settings, or `None` when migrations are disabled or not configured.
+    pub fn migrations_settings(&self) -> Option<MigrationsConfig> {
+        self.properties
+            .migrations
+            .filter(Migrations::has_migrations_enabled)
+            .map(|migrations| migrations.settings())
+    }
+
     /// Returns the configured port or the standard port for the selected backend.
     pub fn get_port_or_default_by_db(&self) -> u16 {
         self.properties
@@ -390,10 +398,47 @@ mod pool_tests {
     }
 }
 
-/// Represents the enabled or disabled migrations for a whole datasource.
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
+/// Migrations for a datasource: `migrations = 'enabled'`, or a table with settings.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Migrations {
-    /// Enables the experimental migrations subsystem.
+    /// The plain switch, with every setting at its default.
+    Simple(MigrationsSwitch),
+    /// The `[migrations]` table.
+    Full(MigrationsConfig),
+}
+
+impl<'de> Deserialize<'de> for Migrations {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{
+            Error, IntoDeserializer, MapAccess, Visitor, value::MapAccessDeserializer,
+        };
+
+        struct MigrationsVisitor;
+
+        impl<'de> Visitor<'de> for MigrationsVisitor {
+            type Value = Migrations;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("'enabled', 'disabled', or a table of migration settings")
+            }
+
+            fn visit_str<E: Error>(self, value: &str) -> Result<Migrations, E> {
+                MigrationsSwitch::deserialize(value.into_deserializer()).map(Migrations::Simple)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Migrations, A::Error> {
+                MigrationsConfig::deserialize(MapAccessDeserializer::new(map)).map(Migrations::Full)
+            }
+        }
+
+        deserializer.deserialize_any(MigrationsVisitor)
+    }
+}
+
+/// The plain `enabled` / `disabled` form of the migrations setting.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
+pub enum MigrationsSwitch {
+    /// Enables the migrations subsystem.
     #[serde(alias = "Enabled", alias = "enabled")]
     Enabled,
 
@@ -402,10 +447,162 @@ pub enum Migrations {
     Disabled,
 }
 
+/// Migration settings of one datasource.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationsConfig {
+    /// Whether migrations run for this datasource.
+    pub enabled: bool,
+    /// Whether migrations run when the application starts.
+    #[serde(default = "default_at_startup")]
+    pub at_startup: bool,
+    /// Whether destructive operations apply without asking.
+    #[serde(default)]
+    pub allow_destructive: bool,
+    /// Table rebuilds over this many rows need confirmation.
+    #[serde(default = "default_rebuild_confirm_rows")]
+    pub rebuild_confirm_rows: u64,
+    /// Seconds to wait for the migrations lock.
+    #[serde(default = "default_lock_timeout_secs")]
+    pub lock_timeout_secs: u64,
+}
+
+/// Migrations disabled, every other setting at its default.
+impl Default for MigrationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            at_startup: default_at_startup(),
+            allow_destructive: false,
+            rebuild_confirm_rows: default_rebuild_confirm_rows(),
+            lock_timeout_secs: default_lock_timeout_secs(),
+        }
+    }
+}
+
+fn default_at_startup() -> bool {
+    true
+}
+
+fn default_rebuild_confirm_rows() -> u64 {
+    100_000
+}
+
+fn default_lock_timeout_secs() -> u64 {
+    60
+}
+
 impl Migrations {
     /// Returns `true` when migrations are enabled.
     pub fn has_migrations_enabled(&self) -> bool {
-        matches!(self, Self::Enabled)
+        match self {
+            Self::Simple(switch) => matches!(switch, MigrationsSwitch::Enabled),
+            Self::Full(config) => config.enabled,
+        }
+    }
+
+    /// The effective settings, with defaults for the plain switch.
+    pub fn settings(&self) -> MigrationsConfig {
+        match self {
+            Self::Simple(switch) => MigrationsConfig {
+                enabled: matches!(switch, MigrationsSwitch::Enabled),
+                ..MigrationsConfig::default()
+            },
+            Self::Full(config) => *config,
+        }
+    }
+}
+
+#[cfg(test)]
+mod migrations_config_tests {
+    use super::*;
+
+    #[derive(Deserialize)]
+    struct Holder {
+        migrations: Migrations,
+    }
+
+    fn try_parse(toml_text: &str) -> Result<Migrations, toml::de::Error> {
+        toml::from_str::<Holder>(toml_text).map(|holder| holder.migrations)
+    }
+
+    fn parse(toml_text: &str) -> Migrations {
+        try_parse(toml_text).expect("parses")
+    }
+
+    #[test]
+    fn todays_form_still_parses() {
+        assert!(parse("migrations = 'enabled'").has_migrations_enabled());
+        assert!(parse("migrations = 'Enabled'").has_migrations_enabled());
+        assert!(!parse("migrations = 'disabled'").has_migrations_enabled());
+        assert!(!parse("migrations = 'Disabled'").has_migrations_enabled());
+        let s = parse("migrations = 'enabled'").settings();
+        assert!(s.at_startup && !s.allow_destructive);
+        assert_eq!((s.rebuild_confirm_rows, s.lock_timeout_secs), (100_000, 60));
+    }
+
+    #[test]
+    fn full_form() {
+        let m = parse(
+            "[migrations]\nenabled = true\nat_startup = false\nallow_destructive = true\nrebuild_confirm_rows = 10\nlock_timeout_secs = 5",
+        );
+        let s = m.settings();
+        assert!(m.has_migrations_enabled() && !s.at_startup && s.allow_destructive);
+        assert_eq!((s.rebuild_confirm_rows, s.lock_timeout_secs), (10, 5));
+    }
+
+    #[test]
+    fn full_form_defaults() {
+        let s = parse("[migrations]\nenabled = true").settings();
+        assert!(s.at_startup && !s.allow_destructive);
+        assert_eq!((s.rebuild_confirm_rows, s.lock_timeout_secs), (100_000, 60));
+    }
+
+    #[test]
+    fn default_is_disabled_with_the_default_settings() {
+        let d = MigrationsConfig::default();
+        assert!(!d.enabled);
+        assert_eq!(parse("migrations = 'disabled'").settings(), d);
+        assert_eq!(
+            parse("[migrations]\nenabled = true").settings(),
+            MigrationsConfig {
+                enabled: true,
+                ..MigrationsConfig::default()
+            }
+        );
+    }
+
+    #[test]
+    fn full_form_disabled() {
+        assert!(!parse("[migrations]\nenabled = false").has_migrations_enabled());
+    }
+
+    fn error_of(toml_text: &str) -> String {
+        try_parse(toml_text).expect_err("rejected").to_string()
+    }
+
+    #[test]
+    fn unknown_key_names_the_key() {
+        let msg = error_of("[migrations]\nenabled = true\nalow_destructive = true");
+        assert!(msg.contains("alow_destructive"), "{msg}");
+    }
+
+    #[test]
+    fn wrong_type_names_the_field() {
+        let msg = error_of("[migrations]\nenabled = true\nat_startup = 'yes'");
+        assert!(msg.contains("at_startup"), "{msg}");
+    }
+
+    #[test]
+    fn missing_enabled_names_the_field() {
+        let msg = error_of("[migrations]\nat_startup = true");
+        assert!(msg.contains("enabled"), "{msg}");
+    }
+
+    #[test]
+    fn unknown_switch_lists_the_values() {
+        let msg = error_of("migrations = 'maybe'");
+        assert!(msg.contains("enabled") && msg.contains("disabled"), "{msg}");
     }
 }
 

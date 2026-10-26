@@ -20,6 +20,7 @@ use crate::model::{CatalogSql, ColumnDef, ColumnDefault, ForeignKey, Ident, Logi
 use crate::model::{NativeType, PrimaryKey};
 use crate::model::{QualifiedName, TableDef};
 use crate::op::{Ctx, Op, Param, Statement};
+use crate::planning::diff::{KeyValue, Precheck};
 use canyon_core::query::querybuilder::syntax::dialect::SqlDialect;
 use canyon_core::types::SqlType;
 use std::fmt;
@@ -55,6 +56,10 @@ pub trait DdlDialect: SqlDialect + Sized {
     /// `ALTER COLUMN`, MySQL `MODIFY`), which a generated column doesn't survive.
     const REWRITES_COLUMN: bool = false;
 
+    /// A column an FK uses, on either side, can't gain or lose its identity while the FK
+    /// exists (MySQL): the FKs are dropped and added back around it.
+    const FK_COLUMNS_BLOCK_IDENTITY_CHANGE: bool = false;
+
     /// The type of a column a generated column uses can't change (PostgreSQL, SQL Server).
     const GENERATED_BLOCKS_BASE_TYPE_CHANGE: bool = false;
 
@@ -86,6 +91,184 @@ pub trait DdlDialect: SqlDialect + Sized {
 
     /// The statements for `op`, in order.
     fn lower(op: &Op, ctx: &Ctx<'_>) -> Result<Vec<Statement>, LowerError>;
+
+    /// `value` as a bound integer to compare with a column of any integer width.
+    fn bigint_param(w: &mut DdlWriter<Self>, value: i64) {
+        w.param(Param::BigInt(value));
+    }
+
+    /// One row, one `BIGINT` column: 1 when the data the check looks for is there, 0 when
+    /// not; for `RowCount`, the rows up to 2; for `RowEstimate`, the estimated row count. `default_schema` is the schema of
+    /// a name that has none.
+    fn precheck(p: &Precheck, default_schema: &str) -> Statement;
+
+    /// One row, one `BIGINT` column: 1 when the migration lock was taken. Doesn't wait.
+    /// Held by the session that took it, until `unlock` or the end of the session.
+    fn try_lock() -> Statement;
+
+    /// Frees the lock `try_lock` took. Only after a `try_lock` that returned 1.
+    /// What it answers differs per backend (a bool on PostgreSQL, no rows on SQL Server,
+    /// an int or NULL on MySQL): don't decode it, run it with `query_rows` or `execute`.
+    fn unlock() -> Statement;
+
+    /// `model` of the newest snapshot, one row; no row when there is none.
+    fn latest_snapshot() -> Statement;
+}
+
+/// The table Canyon keeps its schema snapshots in.
+pub(crate) const SNAPSHOT_TABLE: &str = "canyon_schema_snapshot";
+
+/// The inner SELECT of the prechecks that look the same everywhere; `false` for the others.
+pub(crate) fn exists_body<D: DdlDialect>(w: &mut DdlWriter<D>, p: &Precheck) -> bool {
+    match p {
+        Precheck::NonNull { columns, .. } | Precheck::Duplicates { columns, .. } => {
+            debug_assert!(!columns.is_empty(), "a precheck needs at least one column");
+        }
+        Precheck::Orphans {
+            columns,
+            target_columns,
+            ..
+        } => {
+            debug_assert!(!columns.is_empty(), "a precheck needs at least one column");
+            debug_assert_eq!(
+                columns.len(),
+                target_columns.len(),
+                "a foreign key pairs each column with a target column"
+            );
+        }
+        Precheck::FilledOrphans { columns, .. } => {
+            debug_assert!(
+                columns
+                    .iter()
+                    .any(|(v, _)| !matches!(v, KeyValue::Column(_))),
+                "a filled key needs at least one filled column"
+            );
+        }
+        _ => {}
+    }
+    match p {
+        Precheck::TableHasRows(t) => {
+            w.raw("SELECT 1 FROM ").qualified(t);
+        }
+        Precheck::NonNull { table, columns } => {
+            w.raw("SELECT 1 FROM ").qualified(table).raw(" WHERE ");
+            for (i, c) in columns.iter().enumerate() {
+                if i > 0 {
+                    w.raw(" AND ");
+                }
+                w.ident(c).raw(" IS NOT NULL");
+            }
+        }
+        Precheck::HasNulls { table, column } => {
+            w.raw("SELECT 1 FROM ")
+                .qualified(table)
+                .raw(" WHERE ")
+                .ident(column)
+                .raw(" IS NULL");
+        }
+        Precheck::OutOfRange {
+            table,
+            column,
+            min,
+            max,
+        } => {
+            w.raw("SELECT 1 FROM ")
+                .qualified(table)
+                .raw(" WHERE ")
+                .ident(column)
+                .raw(" < ");
+            D::bigint_param(w, *min);
+            w.raw(" OR ").ident(column).raw(" > ");
+            D::bigint_param(w, *max);
+        }
+        Precheck::Duplicates { table, columns } => {
+            w.raw("SELECT 1 FROM ")
+                .qualified(table)
+                .raw(" GROUP BY ")
+                .idents(columns)
+                .raw(" HAVING COUNT(*) > 1");
+        }
+        Precheck::Orphans {
+            table,
+            columns,
+            target,
+            target_columns,
+        } => {
+            w.raw("SELECT 1 FROM ")
+                .qualified(table)
+                .raw(" AS canyon_c WHERE ");
+            for c in columns {
+                w.raw("canyon_c.").ident(c).raw(" IS NOT NULL AND ");
+            }
+            w.raw("NOT EXISTS (SELECT 1 FROM ")
+                .qualified(target)
+                .raw(" AS canyon_p WHERE ");
+            for (i, (c, t)) in columns.iter().zip(target_columns).enumerate() {
+                if i > 0 {
+                    w.raw(" AND ");
+                }
+                w.raw("canyon_p.").ident(t).raw(" = canyon_c.").ident(c);
+            }
+            w.raw(")");
+        }
+        Precheck::FilledOrphans {
+            table,
+            target,
+            columns,
+        } => {
+            w.raw("SELECT 1 FROM ")
+                .qualified(table)
+                .raw(" AS canyon_c WHERE ");
+            for (value, _) in columns {
+                if let KeyValue::Column(c) = value {
+                    w.raw("canyon_c.").ident(c).raw(" IS NOT NULL AND ");
+                }
+            }
+            w.raw("NOT EXISTS (SELECT 1 FROM ")
+                .qualified(target)
+                .raw(" AS canyon_p WHERE ");
+            for (i, (value, t)) in columns.iter().enumerate() {
+                if i > 0 {
+                    w.raw(" AND ");
+                }
+                w.raw("canyon_p.").ident(t).raw(" = ");
+                match value {
+                    KeyValue::Column(c) => {
+                        w.raw("canyon_c.").ident(c);
+                    }
+                    KeyValue::Fill(v) => fill_param(w, v),
+                    KeyValue::ColumnOrFill(c, v) => {
+                        w.raw("COALESCE(canyon_c.").ident(c).raw(", ");
+                        fill_param(w, v);
+                        w.raw(")");
+                    }
+                }
+            }
+            w.raw(")");
+        }
+        // they differ per backend: each dialect writes them
+        Precheck::LongerThan { .. } | Precheck::RowCount(_) | Precheck::RowEstimate(_) => {
+            return false;
+        }
+    }
+    true
+}
+
+/// A fill value compared with a target column, which may be of another integer width.
+fn fill_param<D: DdlDialect>(w: &mut DdlWriter<D>, value: &Param) {
+    match value {
+        Param::SmallInt(v) => D::bigint_param(w, i64::from(*v)),
+        Param::Int(v) => D::bigint_param(w, i64::from(*v)),
+        Param::BigInt(v) => D::bigint_param(w, *v),
+        other => {
+            w.param(other.clone());
+        }
+    }
+}
+
+/// A length bound as the `int` the databases' length functions return.
+pub(crate) fn length_param(max_len: u32) -> Param {
+    Param::Int(i32::try_from(max_len).unwrap_or(i32::MAX))
 }
 
 /// A request the planner should never make; returned instead of panicking.

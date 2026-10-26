@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mysql.rs
+expression: show(&st)
+---
+SELECT RELEASE_LOCK(CONCAT('canyon_', LEFT(SHA2(DATABASE(), 256), 40)))
+  params: []
+  transactional: true

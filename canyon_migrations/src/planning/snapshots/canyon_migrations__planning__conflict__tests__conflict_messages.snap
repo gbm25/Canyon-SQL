@@ -60,10 +60,10 @@ Migrations for datasource `postgres_docker` stopped: 33 conflicts, nothing was a
      Run `migrate` to confirm it, or set `allow_destructive = true` for this datasource.
 
   21. league: new column `region` is NOT NULL and the table has rows.
-     Make the field an `Option`, or run `migrate` to give a value for the existing rows.
+     Make the field an `Option`, or add the column as nullable, fill the rows by hand, then make it NOT NULL.
 
   22. league: `region` can't become NOT NULL, some rows have no value.
-     Fill them first, or run `migrate` to give a value.
+     Fill those rows by hand first, or keep the field an `Option`.
 
   23. league: some values of `points` don't fit in smallint.
      Keep the wider type, or fix those rows first.
@@ -89,8 +89,8 @@ Migrations for datasource `postgres_docker` stopped: 33 conflicts, nothing was a
   30. league: `points` would be dropped, and the table has generated columns (`total`) that may use it.
      Drop or change those columns by hand first.
 
-  31. league: the value given for the existing rows of `points` doesn't fit its type, smallint.
-     Run `migrate` again and give a smallint value.
+  31. league: the value set for the existing rows of `points` in the code doesn't fit its type, smallint.
+     Set a smallint value.
 
   32. league: `founded` can't become NOT NULL, some rows have no value, and Canyon can't write a value of its type, datetime.
      Fill those rows by hand first.

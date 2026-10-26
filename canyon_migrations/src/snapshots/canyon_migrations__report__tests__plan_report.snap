@@ -1,0 +1,18 @@
+---
+source: canyon_migrations/src/report.rs
+expression: report.to_string()
+---
+Plan for datasource `postgres_docker` (nothing is applied):
+
+  phase 3  create table player
+           CREATE TABLE "player" ("id" integer GENERATED ALWAYS AS IDENTITY NOT NULL)
+  phase 11 add foreign key player (league) to league
+           ALTER TABLE "player" ADD CONSTRAINT "fk" FOREIGN KEY ("league") REFERENCES "league" ("id")
+  info: league.region is text, the field needs text(50). It works; `migrate` can tighten it.
+
+Plan for datasource `mysql_docker`: nothing to change.
+
+Migrations for datasource `sqlserver_docker` stopped: 1 conflict, nothing was applied.
+
+  1. tables `gamer`, `player` swap names. Canyon can't do that in one run.
+     Rename one of them to a temporary name first.

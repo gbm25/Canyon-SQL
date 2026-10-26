@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/pg.rs
+expression: show(&st)
+---
+SELECT pg_catalog.pg_advisory_unlock($1)
+  params: [BigInt(109270116429678)]
+  transactional: true

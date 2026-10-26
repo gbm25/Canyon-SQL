@@ -2,13 +2,14 @@
 
 use super::conflict::{Conflict, Info, Warning};
 use super::decisions::Decisions;
+use super::plan::fits;
 use super::rename::{Previous, Renames};
 use crate::dialect::{fk_name, pk_name};
 use crate::model::{
     ColumnDef, Compat, ForeignKey, Ident, Logical, PrimaryKey, QualifiedName, SchemaModel,
     TableDef, compat,
 };
-use crate::op::Op;
+use crate::op::{Op, Param};
 use canyon_core::types::SqlType;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -57,7 +58,30 @@ pub enum Precheck {
         target: QualifiedName,
         target_columns: Vec<Ident>,
     },
+    /// Rows the new key would leave pointing nowhere once the plan fills some of its
+    /// columns: rows of `table` with no row of `target` holding, in each target column,
+    /// the value the row gets (see [`KeyValue`]). Rows with NULL in a plain `Column`
+    /// don't count.
+    FilledOrphans {
+        table: QualifiedName,
+        target: QualifiedName,
+        /// (where the row's value comes from, target column), in key order.
+        columns: Vec<(KeyValue, Ident)>,
+    },
+    /// The rows of the table, counted up to 2 (2 = two or more).
+    RowCount(QualifiedName),
     RowEstimate(QualifiedName),
+}
+
+/// Where a key column of a [`Precheck::FilledOrphans`] row gets its value.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum KeyValue {
+    /// The column as the database has it now.
+    Column(Ident),
+    /// A new column: the fill value, on every row.
+    Fill(Param),
+    /// An existing column whose NULLs get the fill value.
+    ColumnOrFill(Ident, Param),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -519,14 +543,24 @@ impl Ctx<'_> {
         // New key columns hold one value (NULL or the fill value) on every row, so the
         // existing ones decide whether there are duplicates
         let (old_t, columns) = self.existing_part(t, &wp.columns);
-        let prechecks = if columns.is_empty() {
-            Vec::new()
-        } else {
-            vec![Precheck::Duplicates {
-                table: old_t,
+        // A column that is new or nullable now may get a fill value: the same one on
+        // every row, so only a table with one row at most keeps the key unique
+        let have = self.actual.table(&old_t);
+        let may_fill = wp.columns.iter().any(|c| {
+            let old_c = self.old_column(t, c);
+            have.and_then(|h| h.columns.iter().find(|col| col.name == old_c))
+                .is_none_or(|col| col.nullable)
+        });
+        let mut prechecks = Vec::new();
+        if !columns.is_empty() {
+            prechecks.push(Precheck::Duplicates {
+                table: old_t.clone(),
                 columns,
-            }]
-        };
+            });
+        }
+        if may_fill {
+            prechecks.push(Precheck::RowCount(old_t));
+        }
         Change::checked(
             Op::AddPrimaryKey {
                 table: t.clone(),
@@ -616,42 +650,88 @@ impl Ctx<'_> {
         let t = &wanted.name;
         let old_t = self.old_table(t);
         let have = self.actual.table(&old_t);
-        let mut existing = Vec::new();
+        // Per key column, where its value comes from once the plan filled it. A fill
+        // without a value that fits stops the plan by itself if the table has rows
+        let mut sources: Vec<Source> = Vec::new();
         for c in &fk.columns {
             let old_c = self.old_column(t, c);
-            if have.is_some_and(|h| h.columns.iter().any(|col| col.name == old_c)) {
-                existing.push(old_c);
-            } else if wanted
-                .columns
-                .iter()
-                .find(|col| &col.name == c)
-                .is_none_or(|col| col.nullable)
-            {
+            let col = wanted.columns.iter().find(|col| &col.name == c);
+            let value = |ty: &Logical| {
+                (self.decisions.fill_values.get(&(t.clone(), c.clone())))
+                    .filter(|value| fits(value, ty))
+                    .cloned()
+            };
+            let had = have.and_then(|h| h.columns.iter().find(|col| col.name == old_c));
+            if let Some(had) = had {
+                // Made NOT NULL over its NULLs: they get the fill value (bound to the
+                // column as it is then)
+                let filled = (had.nullable && col.is_some_and(|c| !c.nullable))
+                    .then(|| value(&had.ty))
+                    .flatten();
+                sources.push(Source::Existing(old_c, filled));
+                continue;
+            }
+            let Some(col) = col else {
+                return Vec::new();
+            };
+            if col.nullable {
                 // A new nullable column is NULL on every row: no row can point nowhere
                 return Vec::new();
             }
+            sources.push(Source::New(value(&col.ty)));
         }
+        // The columns the database has now that keep their values (NULLs included)
+        let plain: Vec<Ident> = (sources.iter())
+            .filter_map(|s| match s {
+                Source::Existing(c, None) => Some(c.clone()),
+                _ => None,
+            })
+            .collect();
         match self.existing_columns(&fk.ref_table, &fk.ref_columns) {
-            Some((target, target_columns)) if existing.len() == fk.columns.len() => {
+            Some((target, target_columns)) if plain.len() == fk.columns.len() => {
                 vec![Precheck::Orphans {
                     table: old_t,
-                    columns: existing,
+                    columns: plain,
                     target,
                     target_columns,
                 }]
             }
-            // A new NOT NULL column gets its fill value on every row; whether the target
-            // has it can't be asked before the plan
-            Some(_) => Vec::new(),
+            // Filled rows point at the fill values: the target has to hold them
+            Some((target, target_columns)) => {
+                let mut columns = Vec::new();
+                for (source, target_column) in sources.into_iter().zip(target_columns) {
+                    let value = match source {
+                        Source::Existing(c, None) => KeyValue::Column(c),
+                        Source::Existing(c, Some(v)) => KeyValue::ColumnOrFill(c, v),
+                        Source::New(Some(v)) => KeyValue::Fill(v),
+                        Source::New(None) => return Vec::new(),
+                    };
+                    columns.push((value, target_column));
+                }
+                vec![Precheck::FilledOrphans {
+                    table: old_t,
+                    target,
+                    columns,
+                }]
+            }
             // The plan creates the target, empty when the key is added: any row with a
-            // value points nowhere
-            None if existing.is_empty() => vec![Precheck::TableHasRows(old_t)],
+            // value points nowhere. Filled columns have one on every row, so only the
+            // plain columns' NULLs keep a row out
+            None if plain.is_empty() => vec![Precheck::TableHasRows(old_t)],
             None => vec![Precheck::NonNull {
                 table: old_t,
-                columns: existing,
+                columns: plain,
             }],
         }
     }
+}
+
+/// A key column for `orphan_prechecks`.
+enum Source {
+    /// Its name in the database now, and the fill value its NULLs get.
+    Existing(Ident, Option<Param>),
+    /// A new NOT NULL column and its fill value.
+    New(Option<Param>),
 }
 
 /// Applies the moves, then the table renames (phase 2). Returns the new names

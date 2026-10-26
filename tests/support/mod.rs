@@ -29,6 +29,28 @@ macro_rules! per_backend {
 #[allow(unused_imports)]
 pub(crate) use per_backend;
 
+/// `db` is MySQL (always `false` when the `mysql` feature is off).
+#[allow(dead_code)]
+pub fn is_mysql(db: canyon_sql::connection::DatabaseType) -> bool {
+    match db {
+        #[cfg(feature = "mysql")]
+        canyon_sql::connection::DatabaseType::MySQL => true,
+        #[allow(unreachable_patterns)]
+        _ => false,
+    }
+}
+
+/// `db` is PostgreSQL (always `false` when the `postgres` feature is off).
+#[allow(dead_code)]
+pub fn is_postgres(db: canyon_sql::connection::DatabaseType) -> bool {
+    match db {
+        #[cfg(feature = "postgres")]
+        canyon_sql::connection::DatabaseType::PostgreSql => true,
+        #[allow(unreachable_patterns)]
+        _ => false,
+    }
+}
+
 pub mod test_db;
 
 #[cfg(test)]

@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mysql.rs
+expression: show(&st)
+---
+SELECT CAST(GET_LOCK(CONCAT('canyon_', LEFT(SHA2(DATABASE(), 256), 40)), 0) AS SIGNED)
+  params: []
+  transactional: true

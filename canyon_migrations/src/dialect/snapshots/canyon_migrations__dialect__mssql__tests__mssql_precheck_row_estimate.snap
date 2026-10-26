@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mssql.rs
+expression: show(&st)
+---
+SELECT CAST(COALESCE(SUM(p.rows), 0) AS BIGINT) FROM sys.partitions p WHERE p.object_id = OBJECT_ID(@P1) AND p.index_id IN (0, 1)
+  params: [Text("[player]")]
+  transactional: true

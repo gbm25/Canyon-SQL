@@ -16,6 +16,9 @@ extern crate canyon_migrations;
 /// Reexported elements to the root of the public API
 #[cfg(feature = "migrations")]
 pub mod migrations {
+    // The new engine, no public API promise yet
+    #[doc(hidden)]
+    pub use canyon_migrations::api::*;
     pub use canyon_migrations::migrations::{handler, processor};
 }
 

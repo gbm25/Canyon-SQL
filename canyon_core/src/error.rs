@@ -17,6 +17,9 @@ pub enum CanyonError {
     Query(QueryError),
     QueryBuilder(QueryBuilderError),
     Mapping(MappingError),
+    /// A failure of the migrations runner. Downcast it to
+    /// `canyon_migrations::error::MigrationError` for the details.
+    Migration(Box<dyn Error + Send + Sync>),
 }
 
 impl Display for CanyonError {
@@ -27,6 +30,7 @@ impl Display for CanyonError {
             Self::Query(error) => Display::fmt(error, formatter),
             Self::QueryBuilder(error) => Display::fmt(error, formatter),
             Self::Mapping(error) => Display::fmt(error, formatter),
+            Self::Migration(error) => Display::fmt(error, formatter),
         }
     }
 }
@@ -39,6 +43,7 @@ impl Error for CanyonError {
             Self::Query(error) => Some(error),
             Self::QueryBuilder(error) => Some(error),
             Self::Mapping(error) => Some(error),
+            Self::Migration(error) => Some(error.as_ref()),
         }
     }
 }

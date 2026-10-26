@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/pg.rs
+expression: show(&st)
+---
+SELECT CAST(CASE WHEN pg_catalog.pg_try_advisory_lock($1) THEN 1 ELSE 0 END AS BIGINT)
+  params: [BigInt(109270116429678)]
+  transactional: true

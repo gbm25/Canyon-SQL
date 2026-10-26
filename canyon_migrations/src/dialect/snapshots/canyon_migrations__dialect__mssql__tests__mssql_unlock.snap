@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mssql.rs
+expression: show(&st)
+---
+EXEC sp_releaseapplock @Resource = @P1, @LockOwner = 'Session'
+  params: [Text("canyon_migrations")]
+  transactional: true

@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mssql.rs
+expression: show(&st)
+---
+SELECT CAST(CASE WHEN EXISTS (SELECT 1 FROM [player] AS canyon_c WHERE canyon_c.[league] IS NOT NULL AND NOT EXISTS (SELECT 1 FROM [league] AS canyon_p WHERE canyon_p.[id] = canyon_c.[league])) THEN 1 ELSE 0 END AS BIGINT)
+  params: []
+  transactional: true

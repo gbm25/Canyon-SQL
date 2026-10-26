@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/pg.rs
+expression: show(&st)
+---
+SELECT model FROM "canyon_schema_snapshot" ORDER BY id DESC LIMIT 1
+  params: []
+  transactional: true

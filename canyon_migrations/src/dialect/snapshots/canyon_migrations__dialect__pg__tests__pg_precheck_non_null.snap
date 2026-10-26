@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/pg.rs
+expression: show(&st)
+---
+SELECT CAST(CASE WHEN EXISTS (SELECT 1 FROM "player" WHERE "league" IS NOT NULL AND "age" IS NOT NULL) THEN 1 ELSE 0 END AS BIGINT)
+  params: []
+  transactional: true

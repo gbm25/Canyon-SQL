@@ -2,16 +2,21 @@
 //! A schema is a database.
 
 use super::{DdlDialect, DdlWriter, LowerError, TypeSql, fill_column};
+use super::{SNAPSHOT_TABLE, exists_body, length_param};
 use super::{actual_column, actual_type, add_foreign_key, desired_type, fk_name, one};
 use super::{is_current_timestamp, known, renamed_constraints, restated, rewritable};
 use crate::model::NativeType;
 use crate::model::{ColumnDef, ColumnDefault, ForeignKey, Ident, Length, Logical};
 use crate::model::{QualifiedName, TableDef};
-use crate::op::{Ctx, Op, Statement};
+use crate::op::{Ctx, Op, Param, Statement};
+use crate::planning::diff::Precheck;
 use canyon_core::query::querybuilder::syntax::dialect::MySql;
 use canyon_core::types::SqlType;
 
 type W = DdlWriter<MySql>;
+
+/// 47 characters (the limit is 64), different for each database.
+const LOCK_NAME: &str = "CONCAT('canyon_', LEFT(SHA2(DATABASE(), 256), 40))";
 
 impl DdlDialect for MySql {
     const NAME: &'static str = "MySQL";
@@ -22,6 +27,7 @@ impl DdlDialect for MySql {
     const MAX_PRECISION: u8 = 6;
     const MAX_ROW_BYTES: Option<u64> = Some(65_535);
     const REWRITES_COLUMN: bool = true;
+    const FK_COLUMNS_BLOCK_IDENTITY_CHANGE: bool = true;
     const TEXT_PARAM_TYPES: &'static [&'static str] =
         &["char", "varchar", "tinytext", "text", "mediumtext"];
 
@@ -81,6 +87,68 @@ impl DdlDialect for MySql {
             ColumnDefault::Expr { sql, .. } => w.raw("(").catalog_sql(sql).raw(")"),
             ColumnDefault::Literal { value, .. } => w.literal(value),
         };
+    }
+
+    fn precheck(p: &Precheck, default_schema: &str) -> Statement {
+        let mut w = W::new();
+        match p {
+            Precheck::RowEstimate(table) => {
+                let schema = table.schema.as_ref().map_or(default_schema, Ident::as_str);
+                w.raw("SELECT CAST(COALESCE(MAX(TABLE_ROWS), 0) AS SIGNED) ")
+                    .raw("FROM information_schema.TABLES WHERE TABLE_SCHEMA = ")
+                    .param(Param::Text(schema.to_owned()))
+                    .raw(" AND TABLE_NAME = ")
+                    .param(Param::Text(table.name.as_str().to_owned()));
+            }
+            Precheck::RowCount(table) => {
+                w.raw("SELECT CAST(COUNT(*) AS SIGNED) FROM (SELECT 1 FROM ")
+                    .qualified(table)
+                    .raw(" LIMIT 2) AS canyon_r");
+            }
+            p => {
+                w.raw("SELECT CAST(EXISTS (");
+                if let Precheck::LongerThan {
+                    table,
+                    column,
+                    max_len,
+                } = p
+                {
+                    w.raw("SELECT 1 FROM ")
+                        .qualified(table)
+                        .raw(" WHERE CHAR_LENGTH(")
+                        .ident(column)
+                        .raw(") > ")
+                        .param(length_param(*max_len));
+                } else {
+                    exists_body(&mut w, p);
+                }
+                w.raw(") AS SIGNED)");
+            }
+        }
+        w.finish_with(true)
+    }
+
+    // GET_LOCK names are server-wide: one per database, so two databases migrate at once
+    fn try_lock() -> Statement {
+        let mut w = W::new();
+        w.raw("SELECT CAST(GET_LOCK(")
+            .raw(LOCK_NAME)
+            .raw(", 0) AS SIGNED)");
+        w.finish_with(true)
+    }
+
+    fn unlock() -> Statement {
+        let mut w = W::new();
+        w.raw("SELECT RELEASE_LOCK(").raw(LOCK_NAME).raw(")");
+        w.finish_with(true)
+    }
+
+    fn latest_snapshot() -> Statement {
+        let mut w = W::new();
+        w.raw("SELECT model FROM ")
+            .ident(&Ident::from_catalog(SNAPSHOT_TABLE))
+            .raw(" ORDER BY id DESC LIMIT 1");
+        w.finish_with(true)
     }
 
     fn lower(op: &Op, ctx: &Ctx<'_>) -> Result<Vec<Statement>, LowerError> {
@@ -350,6 +418,27 @@ mod tests {
 
     fn actual(default: Option<ColumnDefault>) -> SchemaModel {
         SchemaModel::from_tables(vec![actual_player("int", "varchar(100)", default)]).unwrap()
+    }
+
+    #[test]
+    fn precheck_snapshots() {
+        for (name, p) in all_prechecks() {
+            let st = MySql::precheck(&p, "main");
+            assert!(st.transactional);
+            insta::assert_snapshot!(format!("mysql_precheck_{name}"), show(&st));
+        }
+    }
+
+    #[test]
+    fn lock_and_snapshot_snapshots() {
+        for (name, st) in [
+            ("try_lock", MySql::try_lock()),
+            ("unlock", MySql::unlock()),
+            ("latest_snapshot", MySql::latest_snapshot()),
+        ] {
+            assert!(st.transactional);
+            insta::assert_snapshot!(format!("mysql_{name}"), show(&st));
+        }
     }
 
     #[test]

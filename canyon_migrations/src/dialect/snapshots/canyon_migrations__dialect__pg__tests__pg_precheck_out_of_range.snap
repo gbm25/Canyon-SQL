@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/pg.rs
+expression: show(&st)
+---
+SELECT CAST(CASE WHEN EXISTS (SELECT 1 FROM "player" WHERE "age" < CAST($1 AS bigint) OR "age" > CAST($2 AS bigint)) THEN 1 ELSE 0 END AS BIGINT)
+  params: [BigInt(-128), BigInt(127)]
+  transactional: true

@@ -34,7 +34,7 @@ pub(crate) mod test_support {
 pub use crate::model::{sql_type_words, type_words};
 pub use conflict::{Conflict, ConflictReport, Info, Limit, ModelIssue, Warning};
 pub use decisions::Decisions;
-pub use diff::{Change, DiffOutput, Precheck, Risk, diff};
+pub use diff::{Change, DiffOutput, KeyValue, Precheck, Risk, diff};
 pub use plan::{Plan, PlannedOp, PrecheckResults, finalize, phase};
 pub use rename::{
     LegacyRow, Previous, RENAME_TABLE_MIN_SHARED, Renames, previous_from_database, resolve,

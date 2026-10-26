@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/report.rs
+expression: report.to_string()
+---
+Migrations for datasource `postgres_docker`: 3 statements applied in 42 ms (run 18f3a2c1-9b2e4d10).
+  info: league.region is text, the field needs text(50). It works; `migrate` can tighten it.
+Migrations for datasource `sqlserver_docker`: nothing to change.

@@ -5,16 +5,19 @@
 //! when it returns, so anything that needs a `SET` keeps it in the same statement.
 
 use super::{DdlDialect, DdlWriter, LowerError, TypeSql, fill_column};
+use super::{SNAPSHOT_TABLE, exists_body, length_param, restated, rewritable};
 use super::{actual_column, actual_type, add_foreign_key, add_primary_key, desired_type};
 use super::{drop_constraint, fk_name, known, one, pk_name, renamed_constraints};
-use super::{restated, rewritable};
 use crate::model::{ColumnDef, ColumnDefault, Ident, Length, Logical, NativeType};
 use crate::model::{QualifiedName, TableDef};
 use crate::op::{Ctx, Op, Param, Statement};
+use crate::planning::diff::Precheck;
 use canyon_core::query::querybuilder::syntax::dialect::MsSql;
 use canyon_core::types::SqlType;
 
 type W = DdlWriter<MsSql>;
+
+const LOCK_NAME: &str = "canyon_migrations";
 
 impl DdlDialect for MsSql {
     const NAME: &'static str = "SQL Server";
@@ -69,6 +72,72 @@ impl DdlDialect for MsSql {
     // T-SQL has no backslash escapes: doubling the quote is all it takes
     fn text_literal(value: &str) -> String {
         format!("N'{}'", value.replace('\'', "''"))
+    }
+
+    fn precheck(p: &Precheck, _default_schema: &str) -> Statement {
+        let mut w = W::new();
+        match p {
+            Precheck::RowEstimate(table) => {
+                // heap (0) or clustered index (1): the other indexes repeat the count
+                let mut name = W::new();
+                name.qualified(table);
+                w.raw("SELECT CAST(COALESCE(SUM(p.rows), 0) AS BIGINT) FROM sys.partitions p ")
+                    .raw("WHERE p.object_id = OBJECT_ID(")
+                    .param(Param::Text(name.into_sql()))
+                    .raw(") AND p.index_id IN (0, 1)");
+            }
+            Precheck::RowCount(table) => {
+                w.raw("SELECT CAST(COUNT(*) AS BIGINT) FROM (SELECT TOP (2) 1 AS canyon_one FROM ")
+                    .qualified(table)
+                    .raw(") AS canyon_r");
+            }
+            p => {
+                w.raw("SELECT CAST(CASE WHEN EXISTS (");
+                if let Precheck::LongerThan {
+                    table,
+                    column,
+                    max_len,
+                } = p
+                {
+                    // LEN skips trailing spaces, as ALTER COLUMN does when it shrinks
+                    w.raw("SELECT 1 FROM ")
+                        .qualified(table)
+                        .raw(" WHERE LEN(")
+                        .ident(column)
+                        .raw(") > ")
+                        .param(length_param(*max_len));
+                } else {
+                    exists_body(&mut w, p);
+                }
+                w.raw(") THEN 1 ELSE 0 END AS BIGINT)");
+            }
+        }
+        w.finish_with(true)
+    }
+
+    fn try_lock() -> Statement {
+        let mut w = W::new();
+        w.raw("DECLARE @r int; EXEC @r = sp_getapplock @Resource = ")
+            .param(Param::Text(LOCK_NAME.into()))
+            .raw(", @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 0; ")
+            .raw("SELECT CAST(CASE WHEN @r >= 0 THEN 1 ELSE 0 END AS BIGINT)");
+        w.finish_with(true)
+    }
+
+    fn unlock() -> Statement {
+        let mut w = W::new();
+        w.raw("EXEC sp_releaseapplock @Resource = ")
+            .param(Param::Text(LOCK_NAME.into()))
+            .raw(", @LockOwner = 'Session'");
+        w.finish_with(true)
+    }
+
+    fn latest_snapshot() -> Statement {
+        let mut w = W::new();
+        w.raw("SELECT TOP 1 model FROM ")
+            .ident(&Ident::from_catalog(SNAPSHOT_TABLE))
+            .raw(" ORDER BY id DESC");
+        w.finish_with(true)
     }
 
     fn lower(op: &Op, ctx: &Ctx<'_>) -> Result<Vec<Statement>, LowerError> {
@@ -410,6 +479,27 @@ mod tests {
 
     fn actual(default: Option<ColumnDefault>) -> SchemaModel {
         SchemaModel::from_tables(vec![actual_player("int", "nvarchar(100)", default)]).unwrap()
+    }
+
+    #[test]
+    fn precheck_snapshots() {
+        for (name, p) in all_prechecks() {
+            let st = MsSql::precheck(&p, "main");
+            assert!(st.transactional);
+            insta::assert_snapshot!(format!("mssql_precheck_{name}"), show(&st));
+        }
+    }
+
+    #[test]
+    fn lock_and_snapshot_snapshots() {
+        for (name, st) in [
+            ("try_lock", MsSql::try_lock()),
+            ("unlock", MsSql::unlock()),
+            ("latest_snapshot", MsSql::latest_snapshot()),
+        ] {
+            assert!(st.transactional);
+            insta::assert_snapshot!(format!("mssql_{name}"), show(&st));
+        }
     }
 
     #[test]

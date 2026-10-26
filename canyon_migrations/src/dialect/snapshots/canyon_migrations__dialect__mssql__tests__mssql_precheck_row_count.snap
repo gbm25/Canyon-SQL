@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mssql.rs
+expression: show(&st)
+---
+SELECT CAST(COUNT(*) AS BIGINT) FROM (SELECT TOP (2) 1 AS canyon_one FROM [player]) AS canyon_r
+  params: []
+  transactional: true

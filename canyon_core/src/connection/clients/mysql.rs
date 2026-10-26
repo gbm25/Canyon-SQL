@@ -18,6 +18,14 @@ impl MySQLConnector {
     pub async fn new(config: &DatasourceConfig) -> CanyonResult<Self> {
         Ok(Self(__impl::load_mysql_config(config).await?))
     }
+
+    /// A connection from the pool; the pool resets it when it comes back.
+    pub(crate) async fn get_conn(&self) -> CanyonResult<mysql_async::Conn> {
+        self.0
+            .get_conn()
+            .await
+            .map_err(|source| ConnectionError::mysql(source).into())
+    }
 }
 
 impl DbConnection for MySQLConnector {
@@ -26,7 +34,8 @@ impl DbConnection for MySQLConnector {
         stmt: &str,
         params: &[&'_ dyn QueryParameter],
     ) -> CanyonResult<CanyonRows> {
-        Ok(CanyonRows::MySQL(execute_query(stmt, params, self).await?))
+        let mut conn = self.get_conn().await?;
+        my_ops::query_rows(&mut conn, stmt, params).await
     }
 
     async fn query<S, R>(&self, stmt: S, params: &[&'_ dyn QueryParameter]) -> CanyonResult<Vec<R>>
@@ -35,11 +44,11 @@ impl DbConnection for MySQLConnector {
         R: RowMapper,
         Vec<R>: FromIterator<<R as RowMapper>::Output>,
     {
-        execute_query(stmt, params, self)
+        let mut conn = self.get_conn().await?;
+        Ok(my_ops::query::<R>(&mut conn, stmt.as_ref(), params)
             .await?
-            .iter()
-            .map(R::deserialize_mysql)
-            .collect()
+            .into_iter()
+            .collect())
     }
 
     async fn query_one<R>(
@@ -50,12 +59,8 @@ impl DbConnection for MySQLConnector {
     where
         R: RowMapper,
     {
-        let result = execute_query(stmt, params, self).await?;
-
-        match result.first() {
-            Some(row) => Ok(Some(R::deserialize_mysql(row)?)),
-            None => Ok(None),
-        }
+        let mut conn = self.get_conn().await?;
+        my_ops::query_one::<R>(&mut conn, stmt, params).await
     }
 
     async fn query_one_for<T: FromSqlOwnedValue>(
@@ -63,7 +68,64 @@ impl DbConnection for MySQLConnector {
         stmt: &str,
         params: &[&'_ dyn QueryParameter],
     ) -> CanyonResult<T> {
-        execute_query(stmt, params, self)
+        let mut conn = self.get_conn().await?;
+        my_ops::query_one_for::<T>(&mut conn, stmt, params).await
+    }
+
+    async fn execute(&self, stmt: &str, params: &[&'_ dyn QueryParameter]) -> CanyonResult<u64> {
+        let mut conn = self.get_conn().await?;
+        my_ops::execute(&mut conn, stmt, params).await
+    }
+
+    fn get_database_type(&self) -> CanyonResult<DatabaseType> {
+        Ok(DatabaseType::MySQL)
+    }
+}
+
+/// The client operations over a single connection, so a caller holding one
+/// connection can run them without going through the pool.
+pub(crate) mod my_ops {
+    use super::*;
+
+    pub(crate) async fn query_rows(
+        conn: &mut mysql_async::Conn,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<CanyonRows> {
+        Ok(CanyonRows::MySQL(execute_query(stmt, params, conn).await?))
+    }
+
+    pub(crate) async fn query<R: RowMapper>(
+        conn: &mut mysql_async::Conn,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<Vec<R::Output>> {
+        execute_query(stmt, params, conn)
+            .await?
+            .iter()
+            .map(R::deserialize_mysql)
+            .collect()
+    }
+
+    pub(crate) async fn query_one<R: RowMapper>(
+        conn: &mut mysql_async::Conn,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<Option<R::Output>> {
+        let result = execute_query(stmt, params, conn).await?;
+
+        match result.first() {
+            Some(row) => Ok(Some(R::deserialize_mysql(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn query_one_for<T: FromSqlOwnedValue>(
+        conn: &mut mysql_async::Conn,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<T> {
+        execute_query(stmt, params, conn)
             .await?
             .first()
             .ok_or(QueryError::NoRows)?
@@ -72,20 +134,19 @@ impl DbConnection for MySQLConnector {
             .map_err(|source| QueryError::mysql_value(source).into())
     }
 
-    async fn execute(&self, stmt: &str, params: &[&'_ dyn QueryParameter]) -> CanyonResult<u64> {
-        let mysql_connection = self.0.get_conn().await.map_err(ConnectionError::mysql)?;
+    pub(crate) async fn execute(
+        conn: &mut mysql_async::Conn,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<u64> {
         let mysql_stmt = generate_mysql_stmt(stmt, params)?;
 
         Ok(mysql_stmt
             .stmt
-            .run(mysql_connection)
+            .run(&mut *conn)
             .await
             .map_err(QueryError::mysql)?
             .affected_rows())
-    }
-
-    fn get_database_type(&self) -> CanyonResult<DatabaseType> {
-        Ok(DatabaseType::MySQL)
     }
 }
 
@@ -100,25 +161,17 @@ pub(crate) mod mysql_query_launcher {
         returns_last_insert_id: bool,
     }
 
-    pub(crate) async fn execute_query<S>(
-        stmt: S,
+    pub(crate) async fn execute_query(
+        stmt: &str,
         params: &[&'_ dyn QueryParameter],
-        connector: &MySQLConnector,
-    ) -> CanyonResult<Vec<Row>>
-    where
-        S: AsRef<str> + Send,
-    {
-        let mysql_connection = connector
-            .0
-            .get_conn()
-            .await
-            .map_err(ConnectionError::mysql)?;
-        let mysql_stmt = generate_mysql_stmt(stmt.as_ref(), params)?;
+        conn: &mut mysql_async::Conn,
+    ) -> CanyonResult<Vec<Row>> {
+        let mysql_stmt = generate_mysql_stmt(stmt, params)?;
 
         let returns_last_insert_id = mysql_stmt.returns_last_insert_id;
         let mut query_result = mysql_stmt
             .stmt
-            .run(mysql_connection)
+            .run(&mut *conn)
             .await
             .map_err(QueryError::mysql)?;
 

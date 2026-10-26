@@ -50,6 +50,8 @@ mysql_common = { version = "0.35.4", default-features = false, features = ["chro
 
 chrono = { version = "0.4", features = ["serde"] }  # Just from TP better?
 serde = { version = "1.0.138", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
 
 futures = "0.3.25"
 async-std = "1.12.0"

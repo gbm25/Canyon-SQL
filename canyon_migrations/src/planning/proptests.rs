@@ -468,6 +468,29 @@ fn whole_or_nothing<D: DdlDialect>(
     Ok(())
 }
 
+/// Every precheck a change needs is in `Prepared.prechecks`, the list the runner asks
+/// the database: a missing one would count as 0 rows and let the change through.
+fn every_precheck_is_asked<D: DdlDialect>(s: &Scenario) -> Result<(), TestCaseError> {
+    let prepared = prepare::<D>(
+        &s.desired,
+        &s.actual,
+        &s.previous,
+        &everything_allowed(),
+        "public",
+        &schemas_of(&s.actual),
+    );
+    for change in &prepared.diff.changes {
+        for p in &change.prechecks {
+            prop_assert!(
+                prepared.prechecks.contains(p),
+                "{p:?} of \"{}\" isn't asked",
+                change.op.describe()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn counts() -> impl Strategy<Value = Vec<u64>> {
     prop::collection::vec(prop_oneof![3 => Just(0u64), 1 => 1u64..1_000_000], 1..6)
 }
@@ -515,6 +538,11 @@ mod postgres {
         }
 
         #[test]
+        fn every_precheck_is_asked(s in scenario()) {
+            super::every_precheck_is_asked::<D>(&s)?;
+        }
+
+        #[test]
         fn conflicts_or_a_whole_plan(s in scenario(), allow in any::<bool>(), counts in counts()) {
             whole_or_nothing::<D>(&s, allow, &counts)?;
         }
@@ -548,6 +576,11 @@ mod sql_server {
         }
 
         #[test]
+        fn every_precheck_is_asked(s in scenario()) {
+            super::every_precheck_is_asked::<D>(&s)?;
+        }
+
+        #[test]
         fn conflicts_or_a_whole_plan(s in scenario(), allow in any::<bool>(), counts in counts()) {
             whole_or_nothing::<D>(&s, allow, &counts)?;
         }
@@ -575,6 +608,11 @@ mod mysql {
         #[test]
         fn planning_again_finds_nothing(s in scenario()) {
             idempotent::<D>(&s)?;
+        }
+
+        #[test]
+        fn every_precheck_is_asked(s in scenario()) {
+            super::every_precheck_is_asked::<D>(&s)?;
         }
 
         #[test]

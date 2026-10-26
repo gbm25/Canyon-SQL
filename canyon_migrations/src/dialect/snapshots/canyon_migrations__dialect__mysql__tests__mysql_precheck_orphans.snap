@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mysql.rs
+expression: show(&st)
+---
+SELECT CAST(EXISTS (SELECT 1 FROM `player` AS canyon_c WHERE canyon_c.`league` IS NOT NULL AND NOT EXISTS (SELECT 1 FROM `league` AS canyon_p WHERE canyon_p.`id` = canyon_c.`league`)) AS SIGNED)
+  params: []
+  transactional: true

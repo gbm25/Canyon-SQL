@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mysql.rs
+expression: show(&st)
+---
+SELECT CAST(EXISTS (SELECT 1 FROM `player` WHERE CHAR_LENGTH(`name`) > ?) AS SIGNED)
+  params: [Int(50)]
+  transactional: true

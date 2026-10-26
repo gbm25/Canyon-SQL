@@ -1,8 +1,18 @@
 // The new engine: no public API promise until it replaces `migrations`
+/// Plan and apply the migrations over every datasource with migrations enabled.
+#[doc(hidden)]
+pub mod api;
 #[doc(hidden)]
 pub mod dialect;
 #[doc(hidden)]
+pub mod error;
+#[doc(hidden)]
+pub mod interactive;
+#[doc(hidden)]
 pub mod introspect;
+/// Canyon's own tables: the snapshot, the history and the old memory.
+#[doc(hidden)]
+pub mod memory;
 /// Holds the data needed by Canyon when the user
 /// application it's running.
 ///
@@ -21,6 +31,10 @@ pub mod model;
 pub mod op;
 #[doc(hidden)]
 pub mod planning;
+#[doc(hidden)]
+pub mod report;
+#[doc(hidden)]
+pub mod runner;
 
 extern crate canyon_crud;
 extern crate canyon_entities;

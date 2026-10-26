@@ -1,4 +1,6 @@
-use crate::connection::clients::mssql::sqlserver_query_launcher::execute_query;
+use crate::connection::clients::mssql::sqlserver_query_launcher::{
+    execute_query, generate_mssql_query_client,
+};
 use crate::connection::contracts::DbConnection;
 use crate::connection::database_type::DatabaseType;
 use crate::connection::datasources::DatasourceConfig;
@@ -11,9 +13,14 @@ use crate::rows::{CanyonRows, FromSqlOwnedValue};
 use bb8::PooledConnection;
 use bb8_tiberius::ConnectionManager as TiberiusConnectionManager;
 use std::sync::Arc;
+use std::time::Duration;
 use tiberius::Query;
 
 type SqlServerConnectionPool = Arc<bb8::Pool<TiberiusConnectionManager>>;
+
+/// How long a dedicated connection may take to connect and log in. It doesn't go
+/// through the pool, so the pool's connection timeout doesn't apply.
+const DEDICATED_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A connector for a `SqlServer` database
 pub struct SqlServerConnector(SqlServerConnectionPool);
@@ -30,6 +37,15 @@ impl SqlServerConnector {
             .await
             .map_err(|source| ConnectionError::sql_server_pool(source).into())
     }
+
+    /// A new connection outside the pool: dropping it ends the server session. Gives up
+    /// with a pool timeout error after [`DEDICATED_CONNECT_TIMEOUT`].
+    pub(crate) async fn dedicated(&self) -> CanyonResult<bb8_tiberius::rt::Client> {
+        match tokio::time::timeout(DEDICATED_CONNECT_TIMEOUT, self.0.dedicated_connection()).await {
+            Ok(conn) => conn.map_err(|source| ConnectionError::sql_server_manager(source).into()),
+            Err(_) => Err(ConnectionError::sql_server_pool(bb8::RunError::TimedOut).into()),
+        }
+    }
 }
 
 impl DbConnection for SqlServerConnector {
@@ -39,16 +55,7 @@ impl DbConnection for SqlServerConnector {
         params: &[&'_ dyn QueryParameter],
     ) -> CanyonResult<CanyonRows> {
         let mut conn = self.get_pooled().await?;
-        let result = execute_query(stmt, params, &mut conn)
-            .await?
-            .into_results()
-            .await
-            .map_err(QueryError::sql_server)?
-            .into_iter()
-            .flatten()
-            .collect();
-
-        Ok(CanyonRows::Tiberius(result))
+        ms_ops::query_rows(&mut conn, stmt, params).await
     }
 
     async fn query<S, R>(&self, stmt: S, params: &[&'_ dyn QueryParameter]) -> CanyonResult<Vec<R>>
@@ -58,15 +65,10 @@ impl DbConnection for SqlServerConnector {
         Vec<R>: FromIterator<<R as RowMapper>::Output>,
     {
         let mut conn = self.get_pooled().await?;
-        execute_query(stmt.as_ref(), params, &mut conn)
+        Ok(ms_ops::query::<R>(&mut conn, stmt.as_ref(), params)
             .await?
-            .into_results()
-            .await
-            .map_err(QueryError::sql_server)?
             .into_iter()
-            .flatten()
-            .map(|row| R::deserialize_sqlserver(&row))
-            .collect()
+            .collect())
     }
 
     async fn query_one<R>(
@@ -78,8 +80,72 @@ impl DbConnection for SqlServerConnector {
         R: RowMapper,
     {
         let mut conn = self.get_pooled().await?;
+        ms_ops::query_one::<R>(&mut conn, stmt, params).await
+    }
 
-        let result = execute_query(stmt, params, &mut conn)
+    async fn query_one_for<T: FromSqlOwnedValue>(
+        &self,
+        stmt: &str,
+        params: &[&'_ dyn QueryParameter],
+    ) -> CanyonResult<T> {
+        let mut conn = self.get_pooled().await?;
+        ms_ops::query_one_for::<T>(&mut conn, stmt, params).await
+    }
+
+    async fn execute(&self, stmt: &str, params: &[&'_ dyn QueryParameter]) -> CanyonResult<u64> {
+        let mut conn = self.get_pooled().await?;
+        ms_ops::execute(&mut conn, stmt, params).await
+    }
+
+    fn get_database_type(&self) -> CanyonResult<DatabaseType> {
+        Ok(DatabaseType::SqlServer)
+    }
+}
+
+/// The client operations over a single connection, so a caller holding one
+/// connection can run them without going through the pool.
+pub(crate) mod ms_ops {
+    use super::*;
+
+    pub(crate) async fn query_rows(
+        conn: &mut bb8_tiberius::rt::Client,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<CanyonRows> {
+        let result = execute_query(stmt, params, conn)
+            .await?
+            .into_results()
+            .await
+            .map_err(QueryError::sql_server)?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        Ok(CanyonRows::Tiberius(result))
+    }
+
+    pub(crate) async fn query<R: RowMapper>(
+        conn: &mut bb8_tiberius::rt::Client,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<Vec<R::Output>> {
+        execute_query(stmt, params, conn)
+            .await?
+            .into_results()
+            .await
+            .map_err(QueryError::sql_server)?
+            .into_iter()
+            .flatten()
+            .map(|row| R::deserialize_sqlserver(&row))
+            .collect()
+    }
+
+    pub(crate) async fn query_one<R: RowMapper>(
+        conn: &mut bb8_tiberius::rt::Client,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<Option<R::Output>> {
+        let result = execute_query(stmt, params, conn)
             .await?
             .into_row()
             .await
@@ -91,20 +157,17 @@ impl DbConnection for SqlServerConnector {
         }
     }
 
-    async fn query_one_for<T: FromSqlOwnedValue>(
-        &self,
+    pub(crate) async fn query_one_for<T: FromSqlOwnedValue>(
+        conn: &mut bb8_tiberius::rt::Client,
         stmt: &str,
-        params: &[&'_ dyn QueryParameter],
+        params: &[&dyn QueryParameter],
     ) -> CanyonResult<T> {
-        let mut conn = self.get_pooled().await?;
-        let row = crate::connection::clients::mssql::sqlserver_query_launcher::execute_query(
-            stmt, params, &mut conn,
-        )
-        .await?
-        .into_row()
-        .await
-        .map_err(QueryError::sql_server)?
-        .ok_or(QueryError::NoRows)?;
+        let row = execute_query(stmt, params, conn)
+            .await?
+            .into_row()
+            .await
+            .map_err(QueryError::sql_server)?
+            .ok_or(QueryError::NoRows)?;
 
         row.into_iter()
             .next()
@@ -117,22 +180,16 @@ impl DbConnection for SqlServerConnector {
             .map_err(Into::into)
     }
 
-    async fn execute(&self, stmt: &str, params: &[&'_ dyn QueryParameter]) -> CanyonResult<u64> {
-        let mssql_query =
-            crate::connection::clients::mssql::sqlserver_query_launcher::generate_mssql_query_client(
-                stmt, params,
-            );
-        let mut conn = self.get_pooled().await?;
-
-        mssql_query
-            .execute(&mut conn)
+    pub(crate) async fn execute(
+        conn: &mut bb8_tiberius::rt::Client,
+        stmt: &str,
+        params: &[&dyn QueryParameter],
+    ) -> CanyonResult<u64> {
+        generate_mssql_query_client(stmt, params)
+            .execute(conn)
             .await
             .map(|r| r.total())
             .map_err(|source| QueryError::sql_server(source).into())
-    }
-
-    fn get_database_type(&self) -> CanyonResult<DatabaseType> {
-        Ok(DatabaseType::SqlServer)
     }
 }
 
@@ -143,7 +200,7 @@ pub(crate) mod sqlserver_query_launcher {
     pub(crate) async fn execute_query<'a>(
         stmt: &str,
         params: &[&dyn QueryParameter],
-        conn: &'a mut bb8::PooledConnection<'_, bb8_tiberius::ConnectionManager>,
+        conn: &'a mut bb8_tiberius::rt::Client,
     ) -> CanyonResult<QueryStream<'a>> {
         let mssql_query = generate_mssql_query_client(stmt, params);
         mssql_query

@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/pg.rs
+expression: show(&st)
+---
+SELECT CAST(CASE WHEN EXISTS (SELECT 1 FROM "player" AS canyon_c WHERE canyon_c."season" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "league" AS canyon_p WHERE canyon_p."season" = canyon_c."season" AND canyon_p."division" = COALESCE(canyon_c."division", $1) AND canyon_p."id" = CAST($2 AS bigint))) THEN 1 ELSE 0 END AS BIGINT)
+  params: [Text("a"), BigInt(7)]
+  transactional: true

@@ -266,7 +266,7 @@ fn join(columns: &[Ident]) -> String {
 
 /// A value bound to a statement, never written into its text. One variant per integer
 /// width: the drivers decode strictly, so the width has to match the column.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Param {
     Text(String),
@@ -301,6 +301,13 @@ pub struct Statement {
     pub params: Vec<Param>,
     /// Can run inside the plan's transaction (false for MySQL DDL, which commits implicitly).
     pub transactional: bool,
+}
+
+impl Statement {
+    /// The parameters, as the connection takes them.
+    pub fn query_params(&self) -> Vec<&dyn QueryParameter> {
+        self.params.iter().map(Param::as_query_param).collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

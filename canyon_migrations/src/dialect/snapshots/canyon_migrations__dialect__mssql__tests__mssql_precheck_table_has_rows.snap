@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/mssql.rs
+expression: show(&st)
+---
+SELECT CAST(CASE WHEN EXISTS (SELECT 1 FROM [player]) THEN 1 ELSE 0 END AS BIGINT)
+  params: []
+  transactional: true

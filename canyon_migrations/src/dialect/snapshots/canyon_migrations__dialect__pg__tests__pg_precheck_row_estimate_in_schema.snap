@@ -1,0 +1,7 @@
+---
+source: canyon_migrations/src/dialect/pg.rs
+expression: show(&st)
+---
+SELECT CAST(GREATEST(COALESCE((SELECT reltuples FROM pg_catalog.pg_class WHERE oid = pg_catalog.to_regclass($1)), 0), 0) AS BIGINT)
+  params: [Text("\"sports\".\"player\"")]
+  transactional: true

@@ -1,0 +1,51 @@
+---
+source: canyon_migrations/src/error.rs
+expression: "text.join(\"\\n---\\n\")"
+---
+Migrations for datasource `postgres_docker` stopped: 1 conflict, nothing was applied.
+
+  1. table `gamer` should be renamed to `player`, but `player` already exists in the database.
+     Drop or rename `player` by hand first, or run `migrate` to choose.
+
+Migrations for datasource `mysql_docker` stopped: 1 conflict, nothing was applied.
+
+  1. tables `a`, `b` swap names. Canyon can't do that in one run.
+     Rename one of them to a temporary name first.
+
+---
+Migrations for datasource `postgres_docker` failed while checking the data: the query returned no rows. Nothing was applied. Check that the database is reachable and the user can run the query, then run again.
+---
+Migrations for datasource `postgres_docker` stopped: reading the database columns failed: failed to read Canyon configuration at "canyon.toml": permission denied. Nothing was applied. Check that the database is reachable and the user can read its schema, then run again.
+---
+Another migration is running on `postgres_docker`, waited 30 s. Try again later or raise `lock_timeout_secs`.
+---
+Migrations for datasource `postgres_docker` failed: the stored schema snapshot has format version 9, this Canyon reads version 1. It was written by another Canyon version. Run that version, or update Canyon. Nothing was applied.
+---
+Migrations for datasource `postgres_docker` failed: player.age has a default read from the database, which a schema snapshot can't hold. The entities should never hold values read from a database, so this is a Canyon bug: report it with the entity named above. Nothing was applied.
+---
+Migrations for datasource `postgres_docker` failed at "alter column player.age": failed to read Canyon configuration at "canyon.toml": permission denied.
+  Statement: ALTER TABLE "player" ALTER COLUMN "age" TYPE bigint
+  `postgres_docker` was rolled back.
+---
+Migrations for datasource `postgres_docker` failed at "alter column player.age": failed to read Canyon configuration at "canyon.toml": permission denied.
+  Statement: ALTER TABLE "player" ALTER COLUMN "age" TYPE bigint
+  The rollback failed too: check the database before the next run.
+---
+Migrations for datasource `mysql_docker` failed at "add column player.age": failed to read Canyon configuration at "canyon.toml": permission denied.
+  Statement: ALTER TABLE `player` ADD COLUMN `age` int
+  Statements before this one stay applied (MySQL can't roll back schema changes); the next run continues from here.
+---
+Migrations for datasource `postgres_docker` ran, but committing them failed: failed to read Canyon configuration at "canyon.toml": permission denied. The outcome is unknown: check the database and `canyon_migration_history` before the next run.
+---
+Migrations for datasource `postgres_docker` can't write the SQL: column `total` is generated from other columns: Canyon doesn't change it. Nothing was applied. Change the column by hand, or make the field match the database.
+---
+Migrations for datasource `postgres_docker` can't start: the datasource has no connection. Check the datasource in `canyon.toml`.
+---
+Migrations stopped before anything ran: nothing was applied. Run `migrate` again to answer the questions.
+---
+Migrations for datasource `mysql_docker` failed at "add column player.age": failed to read Canyon configuration at "canyon.toml": permission denied.
+  Statement: ALTER TABLE `player` ADD COLUMN `age` int
+  Statements before this one stay applied (MySQL can't roll back schema changes); the next run continues from here.
+  Already applied and kept (each database commits on its own): `postgres_docker` (2 statements).
+  `sqlserver_docker` was not attempted.
+  The next run continues with the rest.
